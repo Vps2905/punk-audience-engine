@@ -5,6 +5,7 @@
 venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 data/review_packages/
 data/swarm_outputs/
 data/postgres_outputs/

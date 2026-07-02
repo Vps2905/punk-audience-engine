@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Audience Intelligence Swarm</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #e5e7eb;
+      margin: 0;
+      padding: 32px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: auto;
+    }
+
+    .card {
+      background: #111827;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+
+    h1, h2 {
+      margin-top: 0;
+    }
+
+    button {
+      background: #22c55e;
+      color: #052e16;
+      border: none;
+      padding: 14px 22px;
+      border-radius: 10px;
+      font-weight: bold;
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+    }
+
+    .metric {
+      background: #020617;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 16px;
+    }
+
+    .metric .label {
+      color: #94a3b8;
+      font-size: 13px;
+    }
+
+    .metric .value {
+      font-size: 24px;
+      font-weight: bold;
+      margin-top: 6px;
+    }
+
+    pre {
+      background: #020617;
+      border: 1px solid #1e293b;
+      padding: 16px;
+      border-radius: 12px;
+      overflow-x: auto;
+      max-height: 500px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+
+    th, td {
+      border-bottom: 1px solid #334155;
+      padding: 10px;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    th {
+      color: #93c5fd;
+    }
+
+    .safe {
+      color: #22c55e;
+      font-weight: bold;
+    }
+
+    .warn {
+      color: #fbbf24;
+    }
+
+    input {
+      background: #020617;
+      color: #e5e7eb;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    label {
+      color: #94a3b8;
+      font-size: 13px;
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>Audience Intelligence Swarm</h1>
+      <p>
+        Runs the real Postgres-based swarm pipeline:
+        source → privacy aggregation → embeddings → clustering → synthetic seeds → safe export.
+      </p>
+      <p class="warn">
+        Local/internal demo only. Do not expose this page publicly until auth is added.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Run Real DB Swarm</h2>
+
+      <div class="form-grid">
+        <div>
+          <label>Schema</label>
+          <input id="schemaName" value="public" />
+        </div>
+        <div>
+          <label>Table</label>
+          <input id="tableName" value="maid_extractions" />
+        </div>
+        <div>
+          <label>k_min</label>
+          <input id="kMin" type="number" value="1000" />
+        </div>
+        <div>
+          <label>Synthetic Rows</label>
+          <input id="syntheticRows" type="number" value="1000" />
+        </div>
+      </div>
+
+      <button id="runBtn" onclick="runSwarm()">Run Swarm Pipeline</button>
+      <p id="status"></p>
+    </div>
+
+    <div id="summaryCard" class="card" style="display:none;">
+      <h2>Swarm Output Summary</h2>
+      <div class="grid">
+        <div class="metric">
+          <div class="label">Status</div>
+          <div id="statusValue" class="value"></div>
+        </div>
+        <div class="metric">
+          <div class="label">Safe Cohorts</div>
+          <div id="cohortValue" class="value"></div>
+        </div>
+        <div class="metric">
+          <div class="label">Clusters</div>
+          <div id="clusterValue" class="value"></div>
+        </div>
+        <div class="metric">
+          <div class="label">Synthetic Rows</div>
+          <div id="syntheticValue" class="value"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="privacyCard" class="card" style="display:none;">
+      <h2>Privacy Guarantees</h2>
+      <p class="safe">Raw MAIDs exported: false</p>
+      <p class="safe">Raw email exported: false</p>
+      <p class="safe">Raw phone exported: false</p>
+      <p class="safe">Raw lat/lng exported: false</p>
+      <p class="safe">Individual user data exported: false</p>
+      <p class="safe">Export mode: aggregated traits + synthetic seed profiles only</p>
+    </div>
+
+    <div id="topCohortsCard" class="card" style="display:none;">
+      <h2>Top Cohorts</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Location</th>
+            <th>POI Type</th>
+            <th>Day Part</th>
+            <th>MAID Volume</th>
+            <th>Quality</th>
+            <th>Cluster</th>
+          </tr>
+        </thead>
+        <tbody id="cohortRows"></tbody>
+      </table>
+    </div>
+
+    <div id="filesCard" class="card" style="display:none;">
+      <h2>Generated Files</h2>
+      <pre id="filesOutput"></pre>
+    </div>
+
+    <div id="rawCard" class="card" style="display:none;">
+      <h2>Technical JSON</h2>
+      <pre id="rawOutput"></pre>
+    </div>
+  </div>
+
+  <script>
+    async function runSwarm() {
+      const btn = document.getElementById("runBtn");
+      const status = document.getElementById("status");
+
+      btn.disabled = true;
+      status.innerText = "Running swarm pipeline... this may take a few seconds.";
+
+      const payload = {
+        schema_name: document.getElementById("schemaName").value,
+        table_name: document.getElementById("tableName").value,
+        limit: 10000,
+        k_min: Number(document.getElementById("kMin").value),
+        epsilon: 1.0,
+        synthetic_rows: Number(document.getElementById("syntheticRows").value)
+      };
+
+      try {
+        const res = await fetch("/agents/run-maid-swarm", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text);
+        }
+
+        const data = await res.json();
+
+        status.innerText = "Completed.";
+        renderOutput(data);
+
+      } catch (err) {
+        status.innerText = "Error: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function renderOutput(data) {
+      document.getElementById("summaryCard").style.display = "block";
+      document.getElementById("privacyCard").style.display = "block";
+      document.getElementById("topCohortsCard").style.display = "block";
+      document.getElementById("filesCard").style.display = "block";
+      document.getElementById("rawCard").style.display = "block";
+
+      document.getElementById("statusValue").innerText = data.status;
+      document.getElementById("cohortValue").innerText = data.summary.safe_cohort_count;
+      document.getElementById("clusterValue").innerText = data.summary.cluster_count;
+      document.getElementById("syntheticValue").innerText = data.summary.synthetic_rows;
+
+      const rows = document.getElementById("cohortRows");
+      rows.innerHTML = "";
+
+      for (const cohort of data.summary.top_cohorts || []) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${cohort.location_name ?? "all"}</td>
+          <td>${cohort.primary_poi_type ?? "unknown"}</td>
+          <td>${cohort.created_day_part ?? "all"}</td>
+          <td>${cohort.noisy_maid_volume ?? 0}</td>
+          <td>${cohort.quality_score ?? 0}</td>
+          <td>${cohort.cluster_id ?? "-"}</td>
+        `;
+        rows.appendChild(tr);
+      }
+
+      document.getElementById("filesOutput").innerText = JSON.stringify(data.outputs, null, 2);
+      document.getElementById("rawOutput").innerText = JSON.stringify(data, null, 2);
+    }
+  </script>
+</body>
+</html>

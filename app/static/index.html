@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Audience Intelligence</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div class="badge">Audience Platform · Audience Intelligence Layer</div>
+      <h1>Create privacy-safe audiences from raw data</h1>
+      <p>
+        Upload a CSV, describe the audience you want, and the engine will generate
+        a privacy-safe cohort, synthetic seed profiles, and a Meta-ready export package.
+      </p>
+    </section>
+
+    <section class="workspace">
+      <div class="panel input-panel">
+        <h2>Build Audience</h2>
+        <p class="muted">
+          This single flow runs ingestion, privacy processing, synthetic generation,
+          embeddings, clustering, cohort creation, and Meta-safe export.
+        </p>
+
+        <label>Upload audience CSV</label>
+        <input type="file" id="csvFile" accept=".csv" />
+
+        <label>Audience request</label>
+        <textarea id="prompt" rows="5">Create fitness evening audience and prepare Meta export</textarea>
+
+        <div class="advanced">
+          <details>
+            <summary>Advanced privacy settings</summary>
+            <div class="settings-grid">
+              <div>
+                <label>k-anonymity minimum</label>
+                <input type="number" id="kMin" value="1000" />
+              </div>
+              <div>
+                <label>DP epsilon</label>
+                <input type="number" id="epsilon" value="1.0" step="0.1" />
+              </div>
+              <div>
+                <label>Synthetic rows</label>
+                <input type="number" id="syntheticRows" value="1000" />
+              </div>
+              <div>
+                <label>Export seed limit</label>
+                <input type="number" id="seedLimit" value="1000" />
+              </div>
+            </div>
+            <p class="hint">For real production data, k_min should be 1000+. For this sample CSV, use 1.</p>
+          </details>
+        </div>
+
+        <button class="primary" onclick="generateAudience()">Generate Audience</button>
+
+        <div class="links">
+          <a href="/docs" target="_blank">Open API docs</a>
+        </div>
+      </div>
+
+      <div class="panel output-panel">
+        <div class="output-header">
+          <div>
+            <h2>Audience Output</h2>
+            <p class="muted">Human-readable result generated from the real backend response.</p>
+          </div>
+          <span id="statusPill" class="status-pill idle">Waiting</span>
+        </div>
+
+        <div id="summary" class="summary empty">
+          Upload a CSV and click Generate Audience.
+        </div>
+
+        <h3>Technical Response</h3>
+        <pre id="responseBox">{
+  "status": "waiting"
+}</pre>
+      </div>
+    </section>
+  </main>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>
