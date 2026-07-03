@@ -9,3 +9,8 @@ pydantic
 sqlalchemy
 psycopg2-binary
 python-dotenv
+
+# SDV community package.
+# Note: production DPGCSynthesizer requires SDV Enterprise Differential Privacy Bundle.
+sdv>=1.37.3
+pytest>=8.0.0

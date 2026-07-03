@@ -85,3 +85,15 @@ except RuntimeError:
 @app.get("/ui/audience-agents")
 def audience_agents_ui():
     return _AudienceFileResponse("app/static/audience_agents.html")
+
+from app.api.audience_intelligence_prompt import router as audience_intelligence_prompt_router
+app.include_router(audience_intelligence_prompt_router)
+
+from app.api.audience_intelligence_jobs import router as audience_intelligence_jobs_router
+app.include_router(audience_intelligence_jobs_router)
+
+from app.api.audience_intelligence_modules import router as audience_intelligence_modules_router
+app.include_router(audience_intelligence_modules_router)
+
+from app.api.audience_intelligence_swarm import router as audience_intelligence_swarm_router
+app.include_router(audience_intelligence_swarm_router)

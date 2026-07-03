@@ -1,234 +1,162 @@
-# Audience Intelligence Agents
+# Audience Intelligence Engine
 
-## 1. Project Overview
-This project is a standalone Audience Intelligence Agents / Audience Intelligence Engine demo that converts privacy-safe audience signals into clean features, embeddings/vectors, cohorts, lookalikes, synthetic seed profiles, and Meta-safe export packages.
+This project is a privacy-safe Audience Intelligence microservice for Punk AI. It converts business prompts into safe audience cohorts, lookalikes, and approval-gated export packages using real Postgres-derived signals, aggregation, synthetic-safe seed generation, embeddings, clustering, cohort ranking, and safe export workflows.
 
-## 2. What This Demo Covers
-This v1 demo covers the following five core modules:
-- Module 1: Ingestion & Privacy Layer
-- Module 2: Embedding & Feature Store
-- Module 3: Cohort Management & Lookalike
-- Module 4: Meta Safe Export
-- Module 5: Simple Conversational Trigger
+## Pre-production Status
 
-*Note: Advanced multi-agent orchestration and swarm/background evolution are intentionally not included in this v1 demo.*
+This package is prepared for pre-production technical review and validation.
 
-## 3. High-Level Architecture
+**Verified capabilities:**
+- Real Postgres-derived audience data flow operates securely.
+- End-to-end prompt processing API works.
+- Async job architecture for long-running clustering tasks is stable.
+- Full suite of Agent modules functioning correctly (Ingest, Generate, Embed, Cluster, Export).
+- API Key authentication enforced.
+- Export workflows are correctly approval-gated.
+- Strict privacy constraints (k-anonymity, differential privacy) enforce fail-closed behavior.
 
-```text
-Data Source
-  -> Ingestion & Privacy Layer
-  -> Synthetic Data Generation
-  -> Embedding & Feature Store
-  -> Cohort Management & Lookalike
-  -> Meta Safe Export
-  -> Simple UI / Conversational Trigger
+## Architecture
+
+The system utilizes an agent-based architecture to process data securely:
+
+```mermaid
+graph TD
+    Prompt[Business Prompt] --> Orchestrator[Audience Intelligence Orchestrator Agent]
+    Orchestrator --> Privacy[Privacy Layer Agent]
+    Privacy --> Postgres[(Postgres Data Source)]
+    Privacy --> CleanTable[Clean Feature Table]
+    
+    Orchestrator --> Store[Embedding Feature Store Agent]
+    Store --> CleanTable
+    Store --> Embeddings[TF-IDF Embeddings]
+    
+    Orchestrator --> Cohort[Cohort Management Agent]
+    Cohort --> Embeddings
+    Cohort --> Clusters[Clustered Cohorts & Lookalikes]
+    
+    Orchestrator --> Synthetic[Synthetic Engine Agent]
+    Synthetic --> CleanTable
+    Synthetic --> SyntheticSeeds[DP Synthetic Seeds]
+    
+    Orchestrator --> Export[Safe Export Agent]
+    Clusters --> Export
+    SyntheticSeeds --> Export
+    Export --> Manifest[Approval-Gated Export Manifest]
+    
+    Monitor[Audience Swarm Monitor Agent] -.-> Orchestrator
+    Monitor -.-> Export
 ```
 
-## 4. Current Real DB Demo Result
-Example latest local run results:
-- Raw rows loaded: 269
-- Deduped sessions: 256
-- Safe cohorts: 122
-- Clusters: 8
-- Synthetic seed profiles: 1000
-- Export status: pending_approval
+For detailed agent responsibilities, see [Audience Intelligence Architecture](docs/audience_intelligence_architecture.md).
 
-*Note: These are sample local run numbers and may change when DB data changes.*
+## Module Descriptions
 
-## 5. Module-by-Module Details
+1. **PrivacyLayerAgent:** Loads safe data, applies aggregation and k-anonymity, blocks unsafe columns.
+2. **SyntheticEngineAgent:** Generates safe synthetic seed profiles using differential privacy.
+3. **EmbeddingFeatureStoreAgent:** Generates embeddings and supports safe similarity search.
+4. **CohortManagementAgent:** Performs clustering, scores cohort quality, and generates lookalikes.
+5. **SafeExportAgent:** Creates approval-gated export packages and blocks downstream delivery until approval.
+6. **AudienceIntelligenceOrchestratorAgent:** Orchestrates the end-to-end flow, manages intent, and produces warnings and summaries.
+7. **AudienceSwarmMonitorAgent:** Tracks system health, approvals, and writes monitoring reports.
 
-### Module 1: Ingestion & Privacy Layer
-**Goal:** Safely ingest and clean data.  
-**Current output:**
-- clean_feature_table.csv
-- privacy_report.json
-- hashing_manifest.json
-- dummy_hashing_demo.csv
-- k_anonymity_dp_report.csv
-- lineage_report.json
+## Setup and Commands
 
-**Details:**
-- raw identifiers are not exported
-- real hashed MAIDs are also not exported in review package
-- k-anonymity uses min cohort size
-- basic DP noise is applied
-- lineage tracks source to transformation to output
+### Environment Variables
+Copy `.env.example` to `.env` and set the required variables. For testing, default safe values are provided.
 
-### Module 2: Embedding & Feature Store
-**Current output:**
-- cohort_vectors.npy
-- cohort_metadata.csv
-- vector_preview.csv
-- embedding_manifest.json
-- similarity_search_demo.json
-
-**Details:**
-- current v1 uses TF-IDF vectors
-- production plan supports sentence-transformers/OpenAI-compatible embeddings
-- current vector store is local file
-- future vector DB can be Weaviate/Pinecone/Qdrant/pgvector
-
-### Module 3: Cohort Management & Lookalike
-**Current output:**
-- top_cohorts.csv
-- cluster_summary.csv
-- cohort_quality_report.json
-- lookalike_demo.json
-
-**Details:**
-- clustering creates cohort groups
-- quality scoring checks size/coherence
-- current lookalike is basic same-cluster/safe-trait similarity
-- future lookalike will be stronger vector/ML-based
-
-### Module 4: Meta Safe Export
-**Current output:**
-- synthetic_safe_seed_profiles.csv
-- meta_safe_export_manifest.json
-- export_package_summary.json
-- approval_request.json
-
-**Details:**
-- export is pending approval
-- no automatic external upload
-- no raw MAIDs, raw lat/lng, email, phone, or individual-level data
-- designed as Meta Advantage+ compatible seed package concept
-
-### Module 5: Simple Conversational Trigger
-**Current output:**
-- sample_user_requests.json
-- chat_orchestration_demo.json
-- endpoint_mapping.json
-
-**Details:**
-- basic deterministic trigger demo
-- example: user asks “create montreal restaurant evening cohort and prepare safe export”
-- flow maps request to ingestion, embedding, cohort, export modules
-- full LLM/LangGraph orchestration is future phase
-
-## 6. Repository Structure
-Key directories in this project:
-- `app/agents`
-- `app/api`
-- `app/static`
-- `scripts`
-- `samples`
-- `tests`
-- `data`
-
-**Excluded Folders:**
-The following generated data folders contain outputs that are ignored by Git to preserve privacy and prevent bloating:
-- `data/review_packages/`
-- `data/swarm_outputs/`
-- `data/postgres_outputs/`
-- `data/swarm_monitor/`
-
-## 7. Running Locally
-
-To run the application locally, execute the following commands:
-
+### Setup and Backend Run Command
 ```bash
 cd ~/Downloads/punk-audience-engine
 source .venv/bin/activate
-python3 -m compileall app
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+
+PYTHONPATH=. PRODUCTION_MODE=true REQUIRE_AUDIENCE_API_KEY=true SYNTHETIC_ENGINE=dp_aggregate ALLOW_SYNTHETIC_FALLBACK=false K_ANONYMITY_MIN=1000 \
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-- **UI:** http://127.0.0.1:8000/ui/audience-agents
-- **API latest output:** http://127.0.0.1:8000/agents/latest-five-module-demo-output
+### Prompt UI Usage
+Access the local Prompt UI at: `http://localhost:8000/api/audience-intelligence/prompt/ui`
 
-## 8. Generate Five-Module Demo Outputs
+### API Examples
 
-Run these scripts to generate the output packages:
-
+**Health Check:**
 ```bash
-python3 scripts/generate_five_module_demo_outputs.py
-python3 scripts/split_module_outputs.py
+export AUDIENCE_API_KEY=$(python3 - <<'PY'
+from pathlib import Path
+for raw in Path(".env").read_text(errors="ignore").splitlines():
+    line = raw.strip()
+    if line.startswith("AUDIENCE_API_KEY="):
+        print(line.split("=", 1)[1].strip().strip('"').strip("'"))
+        break
+PY
+)
+
+curl -sS http://localhost:8000/api/audience-intelligence/swarm/health \
+  -H "X-Audience-API-Key: $AUDIENCE_API_KEY" | jq '.status, .health_status'
 ```
 
-These scripts will generate output folders in the following structure:
-```text
-data/review_packages/five_module_demo_<timestamp>_<run_id>/
-  01_ingestion_privacy/
-  02_embeddings_feature_store/
-  03_cohort_management/
-  04_meta_safe_export/
-  05_simple_conversational_trigger/
-  separate_module_zips/
+**Prompt Run Benchmark:**
+```bash
+time curl -sS -X POST http://localhost:8000/api/audience-intelligence/prompt/run \
+  -H "Content-Type: application/json" \
+  -H "X-Audience-API-Key: $AUDIENCE_API_KEY" \
+  -d '{
+    "prompt": "Build me a high-quality restaurant and cafe evening audience for Montreal and San Francisco",
+    "source": "postgres",
+    "approval_required": true,
+    "postgres_limit": 10000,
+    "k_min": 1000,
+    "epsilon": 1.0,
+    "synthetic_rows": 1000,
+    "max_export_cohorts": 25,
+    "min_export_quality": 0.25
+  }' > /tmp/audience_latency_test.json
+
+cat /tmp/audience_latency_test.json | jq '{
+  status,
+  run_id,
+  prompt_selected_cohorts,
+  exported_cohorts: .safe_export.exported_cohorts,
+  approval_status: .safe_export.approval_status
+}'
 ```
 
-## 9. API Endpoints
+### Validation Commands
 
-### Latest Endpoints
-- `POST /agents/generate-five-module-demo-output`
-- `GET /agents/latest-five-module-demo-output`
-- `GET /agents/download-five-module-demo/{artifact_name}`
-- `POST /agents/run-maid-swarm`
-- `POST /agents/monitor-swarm-source`
+**Run Tests:**
+```bash
+PYTHONPATH=. pytest -q \
+  tests/test_synthetic_engine_agent.py \
+  tests/test_synthetic_engine_agent_production_paths.py \
+  tests/test_privacy_layer_agent.py \
+  tests/test_embedding_feature_store_agent.py \
+  tests/test_cohort_management_agent.py \
+  tests/test_safe_export_agent.py \
+  tests/test_audience_intelligence_orchestrator_agent.py \
+  tests/test_audience_job_store.py \
+  tests/test_audience_swarm_monitor_agent.py \
+  tests/test_audience_api_key_auth.py
+```
 
-### Older/Demo Endpoints
-- `POST /ingest`
-- `POST /synthetic/generate`
-- `POST /embed`
-- `POST /search/similar`
-- `POST /cluster`
-- `POST /cohort/create`
-- `POST /cohort/lookalike`
-- `POST /export/meta/{cohort_id}`
+**Run Smoke Test:**
+```bash
+./scripts/smoke_test_audience_intelligence_api.sh
+```
 
-## 10. Privacy and Safety Guarantees
-- `.env` is never committed.
-- DB credentials are never committed.
-- Raw MAIDs are not exported.
-- Hashed real MAIDs are not included in review outputs.
-- Raw observations are not exported.
-- Raw lat/lng is not exported.
-- Individual-level user/device rows are not exported.
-- Outputs are aggregated and/or synthetic only.
-- Exports require manual approval.
+## Privacy and Safety Guarantees
+- No raw identifiers, MAIDs, emails, or exact lat/lngs are exported.
+- Strict k-anonymity limits are enforced.
+- Production environment does not allow unsafe synthetic fallback.
+- Export manifests require explicit API approval.
 
-## 11. What Is Demo v1 vs Production Pending
+For more details, see the [Privacy and Safety Policy](docs/privacy_safety_policy.md) and [Integration Contract](docs/audience_intelligence_integration_contract.md).
 
-### Demo v1:
-- real DB read flow
-- privacy-safe cohorts
-- synthetic seed profiles
-- local vectors
-- clustering
-- basic lookalike
-- export manifest
-- simple UI
+## Known Limitations and Roadmap
+- **Embeddings Migration:** Currently using local TF-IDF embeddings; transition to `pgvector` planned for scalable production.
+- **Privacy Budgeting:** Global epsilon tracking across queries is in development.
 
-### Production pending:
-- SDV DPGCSynthesizer integration
-- sentence-transformer embeddings
-- vector DB integration
-- stronger lookalike agent
-- production auth
-- read-only DB credentials
-- proper background jobs
-- full approval audit trail
-- real Meta API upload only after compliance approval
-- advanced multi-agent orchestration
-- swarm/background evolution
-
-## 12. Git Safety
-To maintain data privacy and security, do **NOT** commit the following:
-- `.env`
-- `data/review_packages/`
-- `data/swarm_outputs/`
-- `data/postgres_outputs/`
-- `data/swarm_monitor/`
-- `*.zip`
-- raw data
-- credentials
-
-## 13. Roadmap
-- **Phase 1:** v1 demo package and UI
-- **Phase 2:** SyntheticEngineAgent with SDV fallback stack
-- **Phase 3:** Embedding upgrade + vector DB
-- **Phase 4:** LookalikeAgent
-- **Phase 5:** SafeExportAgent + approval workflow
-- **Phase 6:** Conversational orchestration
-- **Phase 7:** Production hardening and monitoring
+## Documentation
+- [Architecture](docs/audience_intelligence_architecture.md)
+- [Integration Contract](docs/audience_intelligence_integration_contract.md)
+- [Runbook](docs/audience_intelligence_runbook.md)
+- [Privacy Policy](docs/privacy_safety_policy.md)
+- [Review Checklist](docs/preproduction_review_notes.md)
