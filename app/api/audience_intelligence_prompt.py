@@ -13,7 +13,6 @@ from app.agents.audience_intelligence_orchestrator_agent import AudienceIntellig
 
 from app.core.api_key_auth import require_audience_api_key
 
-
 router = APIRouter(
     prefix="/api/audience-intelligence/prompt",
     tags=["Audience Intelligence Prompt"],
@@ -69,7 +68,7 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
         lines.append("## Match note")
         lines.append("")
         lines.append(
-            "Exact location + business/category + time match was not strong enough, so the system used the safest available fallback match. Review these audiences before approval."
+            "Exact match and fallback status are shown in Coverage warnings and Swarm review. Review before approval."
         )
         lines.append("")
 
@@ -79,6 +78,36 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
         lines.append("")
         for warning in warnings:
             lines.append(f"- {warning}")
+        lines.append("")
+
+    v2 = result.get("v2_autonomous", {}) or {}
+    v2_review = result.get("v2_swarm_review", {}) or {}
+    if v2:
+        lines.append("## Autonomous Audience Intelligence v2")
+        lines.append("")
+        lines.append(f"Status: {v2.get('status')}")
+        lines.append(f"Pipeline: {v2.get('pipeline_version')}")
+        lines.append(f"Prompt confidence: {(v2.get('prompt_intent') or {}).get('confidence_score')}")
+        lines.append(f"Freshness: {(v2.get('data_freshness') or {}).get('freshness_status')}")
+        lines.append(f"Latest source timestamp: {(v2.get('data_freshness') or {}).get('latest_source_timestamp')}")
+        lines.append(f"Source rows checked: {(v2.get('data_freshness') or {}).get('source_rows_checked')}")
+        lines.append(f"Vector count: {(v2.get('embedding_manifest') or {}).get('vector_count')}")
+        lines.append(f"Vector dimension: {(v2.get('embedding_manifest') or {}).get('vector_dimension')}")
+        lines.append(f"Ranked matches: {v2.get('ranked_match_count')}")
+        lines.append(f"Mutation suggestions: {(v2.get('mutation') or {}).get('suggestion_count')}")
+        lines.append(f"Approval required: {v2.get('approval_required')}")
+        lines.append(f"Downstream export enabled: {v2.get('downstream_export_enabled')}")
+
+        if v2_review:
+            lines.append(f"Swarm review status: {v2_review.get('overall_review_status')}")
+            lines.append(f"Coverage warnings: {v2_review.get('coverage_warning_count')}")
+            lines.append(f"Data gaps: {v2_review.get('data_gap_count')}")
+            recommendations = v2_review.get("recommendations") or []
+            if recommendations:
+                lines.append("Swarm recommendations:")
+                for recommendation in recommendations:
+                    lines.append(f"- {recommendation}")
+
         lines.append("")
 
     export_outputs = result.get("safe_export", {}).get("outputs", {})
@@ -143,12 +172,17 @@ def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
         return {
             "status": result["status"],
             "run_id": result["run_id"],
+            "source_mode": result.get("source_mode"),
+            "source_rows": result.get("source_rows"),
+            "privacy_cohorts": result.get("privacy_cohorts"),
             "business_summary": business_summary,
             "business_summary_path": str(business_summary_path),
             "final_summary_path": result["final_summary_path"],
             "run_dir": result["run_dir"],
             "prompt_selected_cohorts": result["prompt_selected_cohorts"],
             "coverage_warnings": result.get("coverage_warnings", []),
+            "v2_autonomous": result.get("v2_autonomous", {}),
+            "v2_swarm_review": result.get("v2_swarm_review", {}),
             "safe_export": {
                 "approval_status": result["safe_export"]["approval_status"],
                 "downstream_export_enabled": result["safe_export"]["downstream_export_enabled"],
@@ -244,8 +278,37 @@ def audience_prompt_ui() -> str:
           return;
         }
 
+        const v2 = data.v2_autonomous || {};
+        const embed = v2.embedding_manifest || {};
+        const mutation = v2.mutation || {};
+        const freshness = v2.data_freshness || {};
+        const review = data.v2_swarm_review || {};
+
+        const v2Summary = [
+          "===== Autonomous Audience Intelligence v2 =====",
+          "Status: " + (v2.status || "unknown"),
+          "Pipeline: " + (v2.pipeline_version || "unknown"),
+          "Freshness: " + (freshness.freshness_status ?? "unknown"),
+          "Latest source timestamp: " + (freshness.latest_source_timestamp ?? "unknown"),
+          "Source rows checked: " + (freshness.source_rows_checked ?? "unknown"),
+          "Vector count: " + (embed.vector_count ?? "unknown"),
+          "Vector dimension: " + (embed.vector_dimension ?? "unknown"),
+          "Ranked matches: " + (v2.ranked_match_count ?? "unknown"),
+          "Mutation suggestions: " + (mutation.suggestion_count ?? "unknown"),
+          "Approval required: " + (v2.approval_required ?? "unknown"),
+          "Downstream export enabled: " + (v2.downstream_export_enabled ?? "unknown"),
+          "Swarm review status: " + (review.overall_review_status || "unknown"),
+          "Data gaps: " + (review.data_gap_count ?? "unknown"),
+          "",
+          "Coverage warnings:",
+          ...(v2.coverage_warnings || []).map(w => "- " + w),
+          "",
+          "===== Business Summary =====",
+          ""
+        ].join("\\n");
+
         const summary = String(data.business_summary || "");
-        output.textContent = summary.split("\\n").join(String.fromCharCode(10));
+        output.textContent = v2Summary + summary.split("\\n").join(String.fromCharCode(10));
       } catch (err) {
         output.textContent = "Request failed: " + err;
       }

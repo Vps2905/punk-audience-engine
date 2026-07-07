@@ -251,6 +251,10 @@ class SafeExportAgent:
             raise TypeError(f"{context} must be a pandas DataFrame.")
 
         if df.empty:
+            # Empty lookalike pairs are valid when only one export-ready audience exists.
+            # Cohorts must not be empty, but lookalike pairs can be zero.
+            if "lookalike" in str(context).lower():
+                return
             raise ValueError(f"{context} cannot be empty.")
 
         self._validate_no_blocked_columns(df.columns, context)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import inspect
 import json
 import os
@@ -18,13 +17,17 @@ from app.agents.synthetic_engine_agent import SyntheticEngineAgent
 from app.agents.embedding_feature_store_agent import EmbeddingFeatureStoreAgent
 from app.agents.cohort_management_agent import CohortManagementAgent
 from app.agents.safe_export_agent import SafeExportAgent
+from app.agents.autonomous_v2_swarm_review_agent import AutonomousV2SwarmReviewAgent
+from app.services.autonomous_audience_intelligence_v2_service import (
+    AutonomousAudienceIntelligenceV2Service,
+)
 
 
 class AudienceIntelligenceOrchestratorAgent:
     """
-    Runs the full Audience Intelligence pipeline from a business prompt.
+    Runs the Audience Intelligence pipeline from a business prompt.
 
-    Full flow:
+    v1 flow remains:
     Postgres/safe input
       -> PrivacyLayerAgent
       -> prompt cohort selection
@@ -32,6 +35,18 @@ class AudienceIntelligenceOrchestratorAgent:
       -> EmbeddingFeatureStoreAgent
       -> CohortManagementAgent
       -> SafeExportAgent
+
+    v2 sidecar:
+      -> all privacy-safe cohorts
+      -> semantic prompt intent
+      -> all-safe-cohort 384-dim embeddings
+      -> dynamic ranking
+      -> mutation/data-gap suggestions
+      -> swarm review
+
+    v2-guided selection:
+      The export path can now use v2-ranked relevant cohorts so broad prompts do
+      not export unrelated high-quality cohorts such as gas_station/casino/car_wash.
     """
 
     def run(
@@ -83,6 +98,7 @@ class AudienceIntelligenceOrchestratorAgent:
         embedding_dir = run_dir / "03_embeddings"
         cohort_dir = run_dir / "04_cohort_management"
         export_dir = run_dir / "05_safe_export"
+        v2_dir = run_dir / "06_v2_autonomous_preview"
 
         if source == "postgres":
             privacy_result = self._run_privacy_layer(
@@ -119,6 +135,102 @@ class AudienceIntelligenceOrchestratorAgent:
         print("PROMPT SELECTED COHORTS:", len(selected_cohorts))
         print("PROMPT FILTER MODE:", prompt_filter_report["filter_mode"])
         print()
+
+        try:
+            v2_result = AutonomousAudienceIntelligenceV2Service().run(
+                prompt=prompt,
+                safe_cohorts=privacy_cohorts,
+                output_dir=v2_dir,
+                freshness_source_df=safe_raw_input,
+            )
+            print("V2 AUTONOMOUS STATUS:", v2_result.get("status"))
+            print("V2 VECTOR COUNT:", v2_result.get("embedding_manifest", {}).get("vector_count"))
+            print("V2 VECTOR DIM:", v2_result.get("embedding_manifest", {}).get("vector_dimension"))
+            print("V2 RANKED MATCHES:", v2_result.get("ranked_match_count"))
+            print("V2 MUTATION SUGGESTIONS:", v2_result.get("mutation", {}).get("suggestion_count"))
+            print()
+        except Exception as exc:
+            v2_result = {
+                "status": "failed",
+                "error": str(exc),
+                "approval_required": True,
+                "downstream_export_enabled": False,
+            }
+            print("V2 AUTONOMOUS STATUS: failed")
+            print("V2 ERROR:", exc)
+            print()
+
+        prompt_filter_report = self._merge_v2_intent_into_prompt_filter_report(
+            prompt_filter_report=prompt_filter_report,
+            v2_result=v2_result,
+        )
+
+        v2_guided_selection_report = {
+            "enabled": False,
+            "reason": "not_attempted",
+            "rows": 0,
+        }
+
+        try:
+            v2_selected_cohorts, v2_guided_selection_report = self._select_cohorts_from_v2_ranked(
+                privacy_cohorts=privacy_cohorts,
+                v2_result=v2_result,
+                prompt_filter_report=prompt_filter_report,
+                max_rows=max_export_cohorts,
+            )
+
+            if len(v2_selected_cohorts) >= 2:
+                selected_cohorts = v2_selected_cohorts
+                selected_cohorts.to_csv(selected_path, index=False)
+                prompt_filter_report["v2_guided_selection"] = v2_guided_selection_report
+
+                print("V2 GUIDED SELECTION:", v2_guided_selection_report)
+                print("V2 GUIDED SELECTED COHORTS:", len(selected_cohorts))
+                print()
+            else:
+                prompt_filter_report["v2_guided_selection"] = v2_guided_selection_report
+                print("V2 GUIDED SELECTION SKIPPED:", v2_guided_selection_report)
+                print()
+        except Exception as exc:
+            v2_guided_selection_report = {
+                "enabled": False,
+                "reason": "failed",
+                "error": str(exc),
+                "rows": 0,
+            }
+            prompt_filter_report["v2_guided_selection"] = v2_guided_selection_report
+            print("V2 GUIDED SELECTION FAILED:", exc)
+            print()
+
+        # STRICT CATEGORY GUARDRAIL:
+        # If user asked for a clear business/category and we could not find a
+        # strong category match, do not export location/daypart-only fallbacks.
+        strict_category_guardrail_report = self._strict_category_export_guardrail(
+            prompt_filter_report=prompt_filter_report,
+            selected_cohorts=selected_cohorts,
+            v2_result=v2_result,
+        )
+        prompt_filter_report["strict_category_export_guardrail"] = strict_category_guardrail_report
+
+        print("STRICT CATEGORY GUARDRAIL:", strict_category_guardrail_report)
+        print()
+
+        if strict_category_guardrail_report.get("block_export"):
+            return self._build_blocked_category_gap_summary(
+                run_id=run_id,
+                prompt=prompt,
+                source_mode=source_mode,
+                safe_raw_input=safe_raw_input,
+                privacy_cohorts=privacy_cohorts,
+                selected_cohorts=selected_cohorts,
+                prompt_filter_report=prompt_filter_report,
+                coverage_warnings=strict_category_guardrail_report.get("warnings", []),
+                v2_result=v2_result,
+                run_dir=run_dir,
+                export_dir=export_dir,
+                final_summary_path=final_summary_path,
+                approval_required=approval_required,
+            )
 
         synthetic_agent = SyntheticEngineAgent()
         synthetic_result = self._call_agent_method(
@@ -219,6 +331,7 @@ class AudienceIntelligenceOrchestratorAgent:
             "prompt_selected_cohorts": int(len(selected_cohorts)),
             "prompt_filter_report": prompt_filter_report,
             "coverage_warnings": coverage_warnings,
+            "v2_autonomous": self._safe_dict(v2_result),
             "synthetic": self._safe_dict(synthetic_result),
             "embedding": {
                 "status": embedding_result["status"],
@@ -245,10 +358,646 @@ class AudienceIntelligenceOrchestratorAgent:
 
         final_summary_path.write_text(json.dumps(final_summary, indent=2, allow_nan=False))
 
+        try:
+            v2_swarm_review = AutonomousV2SwarmReviewAgent().review_run(run_dir)
+        except Exception as exc:
+            v2_swarm_review = {
+                "status": "failed",
+                "overall_review_status": "blocked",
+                "error": str(exc),
+                "approval_required": True,
+                "downstream_export_enabled": False,
+            }
+
+        final_summary["v2_swarm_review"] = self._safe_dict(v2_swarm_review)
+        final_summary_path.write_text(json.dumps(final_summary, indent=2, allow_nan=False))
+
+        print("V2 SWARM REVIEW:", v2_swarm_review.get("overall_review_status"))
         print("FINAL SUMMARY:", final_summary_path)
         print("SAFE EXPORT:", export_result["outputs"]["safe_export_manifest"])
 
         return final_summary
+
+
+
+
+
+    def _merge_v2_intent_into_prompt_filter_report(
+        self,
+        *,
+        prompt_filter_report: Dict[str, Any],
+        v2_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        merged = dict(prompt_filter_report)
+
+        intent = (
+            v2_result.get("prompt_intent")
+            or v2_result.get("intent")
+            or v2_result.get("semantic_intent")
+            or {}
+        )
+
+        if not isinstance(intent, dict):
+            return merged
+
+        def clean_list(values: Any) -> list[str]:
+            if values is None:
+                return []
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, list):
+                return []
+
+            output = []
+            seen = set()
+
+            for value in values:
+                item = str(value).strip().lower()
+                item = item.replace("-", "_").replace(" ", "_")
+                item = re.sub(r"[^a-z0-9_,]+", "", item)
+
+                if item and item not in seen:
+                    seen.add(item)
+                    output.append(item)
+
+            return output
+
+        existing_locations = clean_list(merged.get("locations_detected"))
+        existing_pois = clean_list(merged.get("poi_terms_detected"))
+        existing_dayparts = clean_list(merged.get("dayparts_detected"))
+
+        ai_locations = clean_list(
+            intent.get("locations")
+            or intent.get("available_location_matches")
+        )
+
+        ai_pois = clean_list(
+            intent.get("poi_terms")
+            or intent.get("requested_categories")
+            or intent.get("canonical_categories")
+            or intent.get("matched_available_poi_types")
+        )
+
+        ai_dayparts = clean_list(intent.get("dayparts"))
+
+        merged["locations_detected"] = existing_locations or ai_locations
+        merged["poi_terms_detected"] = existing_pois or ai_pois
+        merged["dayparts_detected"] = existing_dayparts or ai_dayparts
+
+        if not existing_locations and ai_locations:
+            merged["ai_locations_used"] = True
+        if not existing_pois and ai_pois:
+            merged["ai_poi_terms_used"] = True
+        if not existing_dayparts and ai_dayparts:
+            merged["ai_dayparts_used"] = True
+
+        locations = merged.get("locations_detected") or []
+        pois = merged.get("poi_terms_detected") or []
+        dayparts = merged.get("dayparts_detected") or []
+
+        if locations and pois and dayparts:
+            merged["filter_mode"] = "location+poi+daypart"
+        elif locations and pois:
+            merged["filter_mode"] = "location+poi"
+        elif pois and dayparts:
+            merged["filter_mode"] = "poi+daypart"
+        elif pois:
+            merged["filter_mode"] = "poi"
+        elif locations and dayparts:
+            merged["filter_mode"] = "location+daypart"
+        elif locations:
+            merged["filter_mode"] = "location"
+        elif dayparts:
+            merged["filter_mode"] = "daypart"
+
+        merged["ai_intent_merge"] = {
+            "enabled": True,
+            "llm_used": bool(intent.get("llm_used")),
+            "resolver_mode": intent.get("resolver_mode"),
+            "confidence_score": intent.get("confidence_score"),
+            "data_gap_likely": bool(intent.get("data_gap_likely", False)),
+        }
+
+        return merged
+
+
+    def _select_cohorts_from_v2_ranked(
+        self,
+        *,
+        privacy_cohorts: pd.DataFrame,
+        v2_result: Dict[str, Any],
+        max_rows: int,
+        prompt_filter_report: Optional[Dict[str, Any]] = None,
+    ) -> tuple[pd.DataFrame, Dict[str, Any]]:
+        prompt_filter_report = prompt_filter_report or {}
+
+        ranked_path = v2_result.get("ranked_matches_path")
+        min_score = float(os.getenv("V2_EXPORT_MIN_MATCH_SCORE", "0.55"))
+        strong_category_score = float(os.getenv("V2_EXPORT_MIN_CATEGORY_SCORE", "0.70"))
+
+        allowed_match_types = {
+            item.strip()
+            for item in os.getenv(
+                "V2_EXPORT_ALLOWED_MATCH_TYPES",
+                "exact_match,adjacent_category",
+            ).split(",")
+            if item.strip()
+        }
+
+        requested_poi_terms = [
+            str(term).strip().lower()
+            for term in (prompt_filter_report.get("poi_terms_detected") or [])
+            if str(term).strip()
+        ]
+
+        strict_category_requested = bool(requested_poi_terms)
+
+        report = {
+            "enabled": False,
+            "reason": "no_ranked_matches",
+            "ranked_path": ranked_path,
+            "min_score": min_score,
+            "strong_category_score": strong_category_score,
+            "allowed_match_types": sorted(allowed_match_types),
+            "strict_category_requested": strict_category_requested,
+            "requested_poi_terms": requested_poi_terms,
+            "rows": 0,
+        }
+
+        if not ranked_path or not Path(ranked_path).exists():
+            return pd.DataFrame(), report
+
+        ranked = pd.read_csv(ranked_path)
+        if ranked.empty:
+            report["reason"] = "empty_ranked_matches"
+            return pd.DataFrame(), report
+
+        if "final_match_score" not in ranked.columns or "match_type" not in ranked.columns:
+            report["reason"] = "missing_required_v2_score_columns"
+            return pd.DataFrame(), report
+
+        candidate = ranked.copy()
+        candidate["final_match_score"] = pd.to_numeric(
+            candidate["final_match_score"],
+            errors="coerce",
+        ).fillna(0)
+
+        candidate = candidate[
+            candidate["match_type"].astype(str).isin(allowed_match_types)
+            & (candidate["final_match_score"] >= min_score)
+        ].copy()
+
+        if "category_match_score" in candidate.columns:
+            candidate["category_match_score"] = pd.to_numeric(
+                candidate["category_match_score"],
+                errors="coerce",
+            ).fillna(0)
+
+            if strict_category_requested:
+                candidate = candidate[candidate["category_match_score"] >= strong_category_score].copy()
+            else:
+                candidate = candidate[candidate["category_match_score"] >= 0.5].copy()
+        elif strict_category_requested:
+            report["reason"] = "strict_category_requested_but_no_category_score"
+            return pd.DataFrame(), report
+
+        # Hard business-category export filter.
+        # Example:
+        # espresso/coffee prompt must export cafe/coffee cohorts only,
+        # not restaurant/shawarma fallback.
+        candidate, category_filter_report = self._filter_to_requested_export_category(
+            candidate,
+            prompt_filter_report,
+        )
+        report["requested_category_filter"] = category_filter_report
+
+        if candidate.empty:
+            report["reason"] = "no_safe_match_after_requested_category_filter"
+            return pd.DataFrame(), report
+
+        candidate = candidate.sort_values("final_match_score", ascending=False).head(max_rows)
+
+        original_columns = [column for column in privacy_cohorts.columns if column in candidate.columns]
+        selected = candidate[original_columns].copy().reset_index(drop=True)
+
+        report.update(
+            {
+                "enabled": True,
+                "reason": "selected_from_v2_ranked_matches",
+                "rows": int(len(selected)),
+                "top_match_type": str(candidate.iloc[0].get("match_type")),
+                "top_match_score": float(candidate.iloc[0].get("final_match_score")),
+                "top_category_score": float(candidate.iloc[0].get("category_match_score", 0)),
+                "blocked_unrelated_low_score_rows": int(len(ranked) - len(candidate)),
+            }
+        )
+
+        return selected, report
+
+
+
+    def _filter_to_requested_export_category(
+        self,
+        cohorts: pd.DataFrame,
+        prompt_filter_report: Dict[str, Any],
+    ) -> tuple[pd.DataFrame, Dict[str, Any]]:
+        requested_terms = [
+            str(term).strip().lower()
+            for term in (prompt_filter_report.get("poi_terms_detected") or [])
+            if str(term).strip()
+        ]
+
+        report = {
+            "enabled": False,
+            "requested_terms": requested_terms,
+            "allowed_poi_terms": [],
+            "input_rows": int(len(cohorts)),
+            "output_rows": int(len(cohorts)),
+        }
+
+        if cohorts.empty or not requested_terms or "primary_poi_type" not in cohorts.columns:
+            return cohorts, report
+
+        allowed = self._allowed_export_poi_terms_for_request(requested_terms)
+
+        if not allowed:
+            return cohorts, report
+
+        normalized = cohorts["primary_poi_type"].astype(str).str.lower().str.replace(" ", "_", regex=False)
+
+        mask = pd.Series(False, index=cohorts.index)
+        for allowed_term in allowed:
+            allowed_norm = str(allowed_term).lower().replace(" ", "_")
+            mask = mask | normalized.str.contains(re.escape(allowed_norm), na=False)
+
+        filtered = cohorts[mask].copy()
+
+        report.update(
+            {
+                "enabled": True,
+                "allowed_poi_terms": sorted(allowed),
+                "output_rows": int(len(filtered)),
+                "blocked_rows": int(len(cohorts) - len(filtered)),
+            }
+        )
+
+        return filtered, report
+
+    def _allowed_export_poi_terms_for_request(self, requested_terms: list[str]) -> set[str]:
+        normalized_terms = {
+            str(term).lower().replace(" ", "_").replace("-", "_")
+            for term in requested_terms
+            if str(term).strip()
+        }
+
+        allowed: set[str] = set()
+
+        cafe_terms = {"cafe", "coffee", "coffee_shop", "espresso", "snacks"}
+        restaurant_terms = {
+            "restaurant",
+            "food",
+            "fast_food",
+            "quick_service_food",
+            "quick_bites",
+            "casual_dining",
+            "dining",
+        }
+        office_terms = {
+            "office",
+            "coworking",
+            "coworking_space",
+            "corporate_office",
+            "business",
+            "professional",
+            "point_of_interest",
+        }
+        gym_terms = {"gym", "fitness", "workout", "yoga", "health_club"}
+        tattoo_terms = {"tattoo", "body_art_service", "body_ink", "piercing"}
+        healthcare_terms = {"clinic", "healthcare", "hospital", "pharmacy", "dentist"}
+        retail_terms = {"store", "retail", "shopping", "shopping_mall"}
+        beauty_terms = {"salon", "spa", "beauty", "wellness", "grooming", "barber_shop"}
+
+        if normalized_terms & cafe_terms:
+            allowed.update({"cafe", "coffee_shop", "bakery_cafe"})
+
+        if normalized_terms & restaurant_terms:
+            allowed.update({
+                "restaurant",
+                "fast_food",
+                "food",
+                "shawarma_restaurant",
+                "middle_eastern_restaurant",
+                "takeaway",
+            })
+
+        if normalized_terms & office_terms:
+            allowed.update({
+                "coworking_space",
+                "office",
+                "corporate_office",
+                "consultant",
+                "business_center",
+                "point_of_interest",
+            })
+
+        if normalized_terms & gym_terms:
+            allowed.update({"gym", "fitness", "health_club", "yoga_studio"})
+
+        if normalized_terms & tattoo_terms:
+            allowed.update({"body_art_service", "tattoo", "piercing"})
+
+        if normalized_terms & healthcare_terms:
+            allowed.update({"clinic", "healthcare", "hospital", "pharmacy", "dentist"})
+
+        if normalized_terms & retail_terms:
+            allowed.update({"store", "retail", "shopping_mall", "shopping"})
+
+        if normalized_terms & beauty_terms:
+            allowed.update({"salon", "spa", "beauty", "barber_shop"})
+
+        return allowed
+
+    def _strict_category_export_guardrail(
+        self,
+        *,
+        prompt_filter_report: Dict[str, Any],
+        selected_cohorts: pd.DataFrame,
+        v2_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        requested_poi_terms = [
+            str(term).strip().lower()
+            for term in (prompt_filter_report.get("poi_terms_detected") or [])
+            if str(term).strip()
+        ]
+
+        requested_locations = [
+            str(term).strip().lower()
+            for term in (prompt_filter_report.get("locations_detected") or [])
+            if str(term).strip()
+        ]
+
+        strict_category_requested = bool(requested_poi_terms)
+        strict_location_requested = bool(requested_locations)
+        strict_location_category_requested = bool(requested_poi_terms and requested_locations)
+
+        filter_mode = str(prompt_filter_report.get("filter_mode") or "")
+
+        v2_coverage_warnings = v2_result.get("coverage_warnings") or []
+        mutation = v2_result.get("mutation") or {}
+        data_gap_count = int(mutation.get("data_gap_count") or 0)
+
+        warnings = []
+        block_export = False
+        reason = "category_location_guardrail_passed"
+
+        def selected_has_requested_location() -> bool:
+            if not requested_locations:
+                return True
+
+            if selected_cohorts.empty or "location_name" not in selected_cohorts.columns:
+                return False
+
+            selected_locations = (
+                selected_cohorts["location_name"]
+                .dropna()
+                .astype(str)
+                .str.lower()
+                .str.strip()
+                .tolist()
+            )
+
+            for requested in requested_locations:
+                for selected in selected_locations:
+                    if requested in selected or selected in requested:
+                        return True
+
+                    requested_tokens = {t for t in re.split(r"[^a-z0-9]+", requested) if len(t) >= 4}
+                    selected_tokens = {t for t in re.split(r"[^a-z0-9]+", selected) if len(t) >= 4}
+                    if requested_tokens and selected_tokens and requested_tokens.issubset(selected_tokens):
+                        return True
+
+            return False
+
+        if strict_location_category_requested and selected_cohorts.empty:
+            block_export = True
+            reason = "strict_location_category_requested_but_no_safe_exact_match"
+            warnings.append(
+                "A specific location and business/category were requested, but no strong privacy-safe match exists. "
+                "Cross-location or category-only fallback audiences were blocked from export."
+            )
+
+        elif strict_location_category_requested and "location" not in filter_mode:
+            block_export = True
+            reason = "strict_location_category_requested_but_selection_ignored_location"
+            warnings.append(
+                "A specific location and business/category were requested, but selected cohorts did not preserve the requested location. "
+                "They were blocked from export."
+            )
+
+        elif strict_location_category_requested and not selected_has_requested_location():
+            block_export = True
+            reason = "strict_location_category_requested_but_selected_location_mismatch"
+            warnings.append(
+                "A specific location was requested, but selected cohorts came from a different market. "
+                "Cross-location fallback audiences were blocked from export."
+            )
+
+        elif strict_category_requested and selected_cohorts.empty:
+            block_export = True
+            reason = "strict_category_requested_but_no_safe_category_match"
+            warnings.append(
+                "A clear business/category was requested, but no strong privacy-safe category match is available. "
+                "Fallback location/daypart-only audiences were blocked from export."
+            )
+
+        elif strict_category_requested and "poi" not in filter_mode:
+            block_export = True
+            reason = "strict_category_requested_but_selection_is_location_or_daypart_only"
+            warnings.append(
+                "A clear business/category was requested, but selected cohorts were only location/daypart fallbacks. "
+                "They were blocked from export to avoid misleading audience creation."
+            )
+
+        elif strict_location_requested and selected_cohorts.empty:
+            block_export = True
+            reason = "strict_location_requested_but_no_safe_location_match"
+            warnings.append(
+                "A specific location was requested, but no privacy-safe cohort matched that market. "
+                "Cross-location fallback audiences were blocked from export."
+            )
+
+        elif strict_location_requested and "location" not in filter_mode:
+            block_export = True
+            reason = "strict_location_requested_but_selection_ignored_location"
+            warnings.append(
+                "A specific location was requested, but selected cohorts did not preserve that location. "
+                "They were blocked from export."
+            )
+
+        elif strict_category_requested and data_gap_count > 0 and not selected_cohorts.empty:
+            reason = "category_match_available_with_review_required"
+
+        if v2_coverage_warnings:
+            warnings.extend([str(item) for item in v2_coverage_warnings])
+
+        return {
+            "enabled": True,
+            "strict_category_requested": strict_category_requested,
+            "strict_location_requested": strict_location_requested,
+            "strict_location_category_requested": strict_location_category_requested,
+            "requested_poi_terms": requested_poi_terms,
+            "requested_locations": requested_locations,
+            "filter_mode": filter_mode,
+            "selected_rows": int(len(selected_cohorts)),
+            "v2_data_gap_count": data_gap_count,
+            "block_export": bool(block_export),
+            "reason": reason,
+            "warnings": warnings,
+        }
+
+
+    def _build_blocked_category_gap_summary(
+        self,
+        *,
+        run_id: str,
+        prompt: str,
+        source_mode: str,
+        safe_raw_input: pd.DataFrame,
+        privacy_cohorts: pd.DataFrame,
+        selected_cohorts: pd.DataFrame,
+        prompt_filter_report: Dict[str, Any],
+        coverage_warnings: list[str],
+        v2_result: Dict[str, Any],
+        run_dir: Path,
+        export_dir: Path,
+        final_summary_path: Path,
+        approval_required: bool,
+    ) -> Dict[str, Any]:
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        empty_cohorts_path = export_dir / "safe_export_cohorts.csv"
+        empty_lookalikes_path = export_dir / "safe_export_lookalike_pairs.csv"
+        manifest_path = export_dir / "safe_export_manifest.json"
+
+        pd.DataFrame(
+            columns=[
+                "audience_name",
+                "location_name",
+                "primary_poi_type",
+                "created_day_part",
+                "quality_score",
+                "approval_status",
+            ]
+        ).to_csv(empty_cohorts_path, index=False)
+
+        pd.DataFrame(
+            columns=[
+                "source_audience_name",
+                "lookalike_audience_name",
+                "similarity_score",
+                "approval_status",
+            ]
+        ).to_csv(empty_lookalikes_path, index=False)
+
+        safe_export_result = {
+            "status": "blocked_category_data_gap",
+            "approval_status": "needs_human_review",
+            "downstream_export_enabled": False,
+            "exported_cohorts": 0,
+            "exported_lookalike_pairs": 0,
+            "block_reason": "strict_category_requested_but_no_safe_category_match",
+            "outputs": {
+                "safe_export_manifest": str(manifest_path),
+                "safe_export_cohorts": str(empty_cohorts_path),
+                "safe_export_lookalike_pairs": str(empty_lookalikes_path),
+            },
+        }
+
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "status": "blocked_category_data_gap",
+                    "run_id": run_id,
+                    "prompt": prompt,
+                    "approval_required": bool(approval_required),
+                    "approval_status": "needs_human_review",
+                    "downstream_export_enabled": False,
+                    "exported_cohorts": 0,
+                    "exported_lookalike_pairs": 0,
+                    "reason": "Requested category was not available as a strong privacy-safe match. Fallback audiences were blocked.",
+                    "coverage_warnings": coverage_warnings,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        final_summary = {
+            "status": "completed",
+            "run_id": run_id,
+            "prompt": prompt,
+            "source_mode": source_mode,
+            "source_rows": int(len(safe_raw_input)),
+            "privacy_cohorts": int(len(privacy_cohorts)),
+            "prompt_selected_cohorts": int(len(selected_cohorts)),
+            "prompt_filter_report": prompt_filter_report,
+            "coverage_warnings": coverage_warnings,
+            "v2_autonomous": self._safe_dict(v2_result),
+            "synthetic": {
+                "status": "skipped",
+                "reason": "strict_category_data_gap_blocked_export",
+            },
+            "embedding": {
+                "status": "skipped",
+                "vector_count": 0,
+                "vector_dimension": 0,
+                "outputs": {},
+            },
+            "cohort_management": {
+                "status": "skipped",
+                "managed_cohorts": 0,
+                "cluster_count": 0,
+                "export_ready_cohorts": 0,
+                "reason": "strict_category_data_gap_blocked_export",
+            },
+            "safe_export": safe_export_result,
+            "privacy_guarantees": {
+                "raw_maids_exported": False,
+                "hashed_identifiers_exported": False,
+                "raw_observations_exported": False,
+                "raw_lat_lng_exported": False,
+                "raw_email_exported": False,
+                "raw_phone_exported": False,
+                "individual_user_data_exported": False,
+                "approval_required": bool(approval_required),
+                "approval_status": "needs_human_review",
+            },
+            "run_dir": str(run_dir),
+            "final_summary_path": str(final_summary_path),
+        }
+
+        final_summary_path.write_text(json.dumps(final_summary, indent=2, allow_nan=False))
+
+        try:
+            v2_swarm_review = AutonomousV2SwarmReviewAgent().review_run(run_dir)
+        except Exception as exc:
+            v2_swarm_review = {
+                "status": "failed",
+                "overall_review_status": "needs_human_review",
+                "error": str(exc),
+                "approval_required": True,
+                "downstream_export_enabled": False,
+            }
+
+        final_summary["v2_swarm_review"] = self._safe_dict(v2_swarm_review)
+        final_summary_path.write_text(json.dumps(final_summary, indent=2, allow_nan=False))
+
+        print("STRICT CATEGORY DATA GAP: export blocked")
+        print("FINAL SUMMARY:", final_summary_path)
+        print("SAFE EXPORT:", manifest_path)
+
+        return final_summary
+
 
     def _run_privacy_layer(
         self,
@@ -422,7 +1171,17 @@ class AudienceIntelligenceOrchestratorAgent:
         obj = self._parse_jsonish(value)
 
         if isinstance(obj, dict):
-            for key in ["location_name", "city", "place_name", "name", "label", "area", "region", "address", "formatted_address"]:
+            for key in [
+                "location_name",
+                "city",
+                "place_name",
+                "name",
+                "label",
+                "area",
+                "region",
+                "address",
+                "formatted_address",
+            ]:
                 candidate = obj.get(key)
                 if self._safe_text(candidate):
                     return self._clean_text(candidate)
@@ -528,20 +1287,48 @@ class AudienceIntelligenceOrchestratorAgent:
         return None
 
     def _poi_hint_from_prompt(self, prompt: str) -> Optional[str]:
-        lower = prompt.lower()
+        lower = prompt.lower().replace("-", " ")
 
         mapping = {
             "restaurant": "restaurant",
+            "quick service food": "restaurant",
+            "quick bites": "restaurant",
+            "casual dining": "restaurant",
+            "fast meals": "restaurant",
             "food": "food",
             "cafe": "cafe",
             "coffee": "cafe",
+            "espresso": "cafe",
             "gym": "gym",
             "fitness": "gym",
+            "workout": "gym",
+            "yoga": "gym",
             "health": "health",
             "barber": "barber_shop",
             "tattoo": "body_art_service",
+            "body ink": "body_art_service",
+            "piercing": "body_art_service",
+            "office": "coworking_space",
+            "coworking": "coworking_space",
+            "business center": "coworking_space",
+            "business centers": "coworking_space",
+            "business place": "coworking_space",
+            "business places": "coworking_space",
+            "professional": "coworking_space",
+            "professionals": "coworking_space",
             "store": "store",
             "retail": "store",
+            "shopping": "store",
+            "clinic": "healthcare",
+            "pharmacy": "healthcare",
+            "healthcare": "healthcare",
+            "students": "school",
+            "campus": "school",
+            "nightlife": "bar",
+            "self care": "salon",
+            "self-care": "salon",
+            "wellness": "salon",
+            "grooming": "salon",
         }
 
         for key, value in mapping.items():
@@ -550,124 +1337,266 @@ class AudienceIntelligenceOrchestratorAgent:
 
         return None
 
-    def _select_cohorts_for_prompt(self, *, prompt: str, cohorts: pd.DataFrame) -> tuple[pd.DataFrame, Dict[str, Any]]:
-        df = cohorts.copy()
-        lower = prompt.lower()
 
-        locations = self._extract_location_terms(prompt, df)
-        pois = self._extract_poi_terms(prompt)
-        dayparts = [item for item in ["morning", "afternoon", "evening", "night"] if item in lower]
 
-        attempts = []
 
-        def apply_filter(use_locations: bool, use_pois: bool, use_dayparts: bool) -> pd.DataFrame:
-            mask = pd.Series(True, index=df.index)
 
-            if use_locations and locations:
-                loc_mask = pd.Series(False, index=df.index)
-                for loc in locations:
-                    loc_mask = loc_mask | df["location_name"].astype(str).str.lower().str.contains(re.escape(loc), na=False)
-                mask = mask & loc_mask
+    def _select_cohorts_for_prompt(self, prompt: str, cohorts):
+        from app.agents.autonomous_prompt_cohort_selector_agent import AutonomousPromptCohortSelectorAgent
 
-            if use_pois and pois:
-                poi_mask = pd.Series(False, index=df.index)
-                for poi in pois:
-                    poi_mask = poi_mask | df["primary_poi_type"].astype(str).str.lower().str.contains(re.escape(poi), na=False)
-                mask = mask & poi_mask
+        return AutonomousPromptCohortSelectorAgent().select(
+            prompt=prompt,
+            cohorts=cohorts,
+        )
 
-            if use_dayparts and dayparts:
-                day_mask = df["created_day_part"].astype(str).str.lower().isin(dayparts)
-                mask = mask & day_mask
-
-            return df[mask].copy()
-
-        strategies = [
-            ("location+poi+daypart", True, True, True),
-            ("location+poi", True, True, False),
-            ("location+daypart", True, False, True),
-            ("poi+daypart", False, True, True),
-            ("location", True, False, False),
-            ("poi", False, True, False),
-            ("daypart", False, False, True),
-            ("all", False, False, False),
-        ]
-
-        selected = df.copy()
-        mode = "all"
-
-        for strategy_name, use_locations, use_pois, use_dayparts in strategies:
-            candidate = apply_filter(use_locations, use_pois, use_dayparts)
-            attempts.append({"strategy": strategy_name, "rows": int(len(candidate))})
-
-            if len(candidate) >= 2:
-                selected = candidate
-                mode = strategy_name
-                break
-
-        if "high quality" in lower or "high-quality" in lower or "best" in lower:
-            quality_col = "quality_score" if "quality_score" in selected.columns else None
-            if quality_col:
-                selected = selected.sort_values(quality_col, ascending=False)
-
-        return selected.reset_index(drop=True), {
-            "filter_mode": mode,
-            "locations_detected": locations,
-            "poi_terms_detected": pois,
-            "dayparts_detected": dayparts,
-            "attempts": attempts,
-            "high_quality_requested": bool("high quality" in lower or "high-quality" in lower or "best" in lower),
-        }
 
     def _extract_location_terms(self, prompt: str, df: pd.DataFrame) -> list[str]:
         lower = prompt.lower()
+        lower_clean = re.sub(r"[^a-z0-9\s,]+", " ", lower)
+        lower_clean = re.sub(r"\s+", " ", lower_clean).strip()
+
+        manual_locations = [
+            "times square, new york",
+            "times square",
+            "montreal downtown",
+            "montreal qc",
+            "san francisco",
+            "new york",
+            "los angeles",
+            "toronto",
+            "quebec",
+            "vancouver",
+            "chicago",
+            "montreal",
+            "hyderabad",
+            "bangalore",
+            "mumbai",
+            "delhi",
+        ]
+
         found = []
 
-        if "location_name" not in df.columns:
-            return found
+        # First trust explicit user text only.
+        for location in sorted(manual_locations, key=len, reverse=True):
+            location_clean = location.lower().strip()
+            location_regex = re.escape(location_clean).replace(r"\,", r",?\s*")
+            if re.search(rf"\b{location_regex}\b", lower_clean):
+                found.append(location_clean)
 
-        for location in df["location_name"].dropna().astype(str).str.lower().unique():
-            location = location.strip()
-            if len(location) < 3:
+        # If prompt explicitly mentions a known city, do not infer every DB sub-area
+        # containing that city. Example: "New York" should not become
+        # "times square, new york" unless user actually said Times Square.
+        if found:
+            return self._dedupe_location_terms(found)
+
+        # Fallback: use exact full location names from safe cohort table only.
+        # Do not use loose token matching because that creates false detections.
+        if "location_name" in df.columns:
+            for location in df["location_name"].dropna().astype(str).str.lower().unique():
+                location = re.sub(r"\s+", " ", location.strip())
+                if len(location) < 3:
+                    continue
+
+                escaped = re.escape(location).replace(r"\,", r",?\s*")
+                if re.search(rf"\b{escaped}\b", lower_clean):
+                    found.append(location)
+
+        return self._dedupe_location_terms(found)
+
+    def _dedupe_location_terms(self, values: list[str]) -> list[str]:
+        cleaned = []
+        seen = set()
+
+        for value in values:
+            item = str(value).strip().lower()
+            item = re.sub(r"\s+", " ", item)
+
+            if not item or item in seen:
                 continue
 
-            if location in lower:
-                found.append(location)
-                continue
+            seen.add(item)
+            cleaned.append(item)
 
-            parts = [p for p in re.split(r"[\s,]+", location) if len(p) >= 4]
-            if any(part in lower for part in parts):
-                found.append(location)
+        # Remove broad duplicate when a more specific requested location exists.
+        # Example: ["times square, new york", "new york"] -> ["times square, new york"]
+        final = []
+        for item in cleaned:
+            is_parent_duplicate = any(
+                item != other and item in other
+                for other in cleaned
+            )
+            if not is_parent_duplicate:
+                final.append(item)
 
-        manual = ["montreal", "san francisco", "new york", "los angeles", "toronto", "quebec"]
-        for item in manual:
-            if item in lower and item not in found:
-                found.append(item)
+        return final
 
-        return list(dict.fromkeys(found))
+
 
     def _extract_poi_terms(self, prompt: str) -> list[str]:
-        lower = prompt.lower()
+        lower = prompt.lower().replace("-", " ")
+        lower = re.sub(r"\s+", " ", lower).strip()
+
         terms = []
 
-        mapping = {
-            "restaurant": ["restaurant", "food"],
-            "food": ["food", "restaurant"],
-            "cafe": ["cafe", "coffee"],
-            "coffee": ["cafe", "coffee"],
-            "gym": ["gym", "fitness", "health"],
-            "fitness": ["gym", "fitness", "health"],
-            "health": ["health"],
-            "barber": ["barber_shop", "barber"],
-            "tattoo": ["body_art_service", "tattoo"],
-            "store": ["store"],
-            "retail": ["store"],
-        }
+        def has_any(values: list[str]) -> bool:
+            return any(value in lower for value in values)
 
-        for key, values in mapping.items():
-            if key in lower:
-                terms.extend(values)
+        # Priority rule:
+        # The business object wins over contextual words.
+        # "caffeine break after office" means cafe + evening, not office.
+        cafe_signals = [
+            "cafe",
+            "coffee",
+            "espresso",
+            "caffeine",
+            "caffeine break",
+            "coffee break",
+            "grab coffee",
+            "grab espresso",
+        ]
+
+        restaurant_signals = [
+            "restaurant",
+            "food street",
+            "food streets",
+            "quick service",
+            "quick bites",
+            "fast meals",
+            "casual dining",
+            "dining",
+            "dinner",
+        ]
+
+        office_signals = [
+            "coworking",
+            "coworking hub",
+            "coworking hubs",
+            "coworking space",
+            "coworking spaces",
+            "flexible workspace",
+            "flexible workspaces",
+            "workspace",
+            "workspaces",
+            "business center",
+            "business centers",
+            "business place",
+            "business places",
+            "business hub",
+            "business hubs",
+            "corporate office",
+            "office crowd",
+            "working professional",
+            "working professionals",
+            "young professional",
+            "young professionals",
+            "professionals around",
+        ]
+
+        gym_signals = [
+            "gym",
+            "fitness",
+            "workout",
+            "workouts",
+            "training session",
+            "training sessions",
+            "yoga",
+        ]
+
+        tattoo_signals = [
+            "tattoo",
+            "body ink",
+            "body art",
+            "piercing",
+        ]
+
+        healthcare_signals = [
+            "clinic",
+            "pharmacy",
+            "pharmacies",
+            "healthcare",
+            "hospital",
+            "doctor",
+            "dentist",
+        ]
+
+        retail_signals = [
+            "retail",
+            "shopping",
+            "shopping area",
+            "shopping areas",
+            "store",
+            "mall",
+        ]
+
+        beauty_signals = [
+            "wellness",
+            "grooming",
+            "self care",
+            "self-care",
+            "salon",
+            "spa",
+            "beauty",
+            "barber",
+        ]
+
+        nightlife_signals = [
+            "nightlife",
+            "bar",
+            "pub",
+            "club",
+            "lounge",
+        ]
+
+        education_signals = [
+            "student",
+            "students",
+            "campus",
+            "school",
+            "college",
+            "university",
+        ]
+
+        if has_any(cafe_signals):
+            terms.extend(["cafe", "coffee"])
+
+        if has_any(restaurant_signals):
+            terms.extend(["restaurant", "food", "fast_food"])
+
+        if has_any(office_signals):
+            terms.extend(["coworking_space", "office", "corporate_office", "point_of_interest"])
+
+        # Plain "office" should not become office category when used only as time phrase.
+        # Example: "after office" means evening.
+        office_temporal_only = any(
+            phrase in lower
+            for phrase in ["after office", "after office hours", "post office hours"]
+        )
+        if "office" in lower and not office_temporal_only and not has_any(cafe_signals):
+            terms.extend(["coworking_space", "office", "corporate_office", "point_of_interest"])
+
+        if has_any(gym_signals):
+            terms.extend(["gym", "fitness", "health_club"])
+
+        if has_any(tattoo_signals):
+            terms.extend(["body_art_service", "tattoo"])
+
+        if has_any(healthcare_signals):
+            terms.extend(["clinic", "healthcare", "hospital", "pharmacy"])
+
+        if has_any(retail_signals):
+            terms.extend(["store", "retail", "shopping_mall"])
+
+        if has_any(beauty_signals):
+            terms.extend(["salon", "spa", "beauty", "barber_shop"])
+
+        if has_any(nightlife_signals):
+            terms.extend(["bar", "pub", "club", "lounge"])
+
+        if has_any(education_signals):
+            terms.extend(["school", "college", "university", "campus"])
 
         return list(dict.fromkeys(terms))
+
 
     def _build_coverage_warnings(
         self,
@@ -794,7 +1723,6 @@ class AudienceIntelligenceOrchestratorAgent:
             )
 
         return warnings
-
 
     def _build_run_id(self, prompt: str) -> str:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
