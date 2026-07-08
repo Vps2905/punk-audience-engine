@@ -23,3 +23,6 @@ data/roman_review_outputs/
 data/hybrid_retrieval_smoke/
 app/agents/*.bak_*
 *.bak_*
+
+# Ignore full local generated data folder
+data/
