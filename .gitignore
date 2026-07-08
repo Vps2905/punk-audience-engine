@@ -16,3 +16,10 @@ logs/
 *.db
 *.parquet
 .DS_Store
+
+# Local/generated audience intelligence outputs
+data/prompt_runs/
+data/roman_review_outputs/
+data/hybrid_retrieval_smoke/
+app/agents/*.bak_*
+*.bak_*
