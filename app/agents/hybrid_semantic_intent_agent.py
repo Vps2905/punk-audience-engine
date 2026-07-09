@@ -537,48 +537,89 @@ Return JSON only with this schema:
     def _exact_safe_combo_available(
         self,
         *,
-        locations: list[str],
-        poi_terms: list[str],
-        dayparts: list[str],
-        rag_context: dict[str, Any],
+        locations,
+        poi_terms,
+        dayparts,
+        rag_context,
     ) -> bool:
-        combos = rag_context.get("safe_available_combinations") or []
+        """Return True only when every requested location has the requested POI/daypart combo.
 
-        if not combos or not locations or not poi_terms or not dayparts:
+        Production safety rule:
+        - Multi-location request must not pass just because one requested city has a match.
+        - Each requested location needs its own exact safe location + category + daypart combo.
+        """
+
+        def norm(value):
+            import re
+
+            if value is None:
+                return ""
+            value = str(value).lower().replace("_", " ")
+            value = re.sub(r"[^a-z0-9]+", " ", value)
+            return re.sub(r"\s+", " ", value).strip()
+
+        requested_locations = [norm(x) for x in (locations or []) if norm(x)]
+        requested_pois = [norm(x) for x in (poi_terms or []) if norm(x)]
+        requested_dayparts = [norm(x) for x in (dayparts or []) if norm(x)]
+
+        combos = (rag_context or {}).get("safe_available_combinations") or []
+        if not combos:
             return False
 
-        normalized_locations = [self._match_norm(item) for item in locations]
-        normalized_pois = [self._match_norm(item) for item in poi_terms]
-        normalized_dayparts = [self._match_norm(item) for item in dayparts]
-
+        normalized_combos = []
         for combo in combos:
-            combo_location = self._match_norm(combo.get("location_name"))
-            combo_poi = self._match_norm(combo.get("primary_poi_type"))
-            combo_daypart = self._match_norm(combo.get("created_day_part"))
-
-            location_ok = any(
-                requested == combo_location
-                or requested in combo_location
-                or combo_location in requested
-                for requested in normalized_locations
+            normalized_combos.append(
+                {
+                    "location": norm(combo.get("location_name")),
+                    "poi": norm(combo.get("primary_poi_type")),
+                    "daypart": norm(combo.get("created_day_part")),
+                }
             )
 
-            poi_ok = any(
-                requested == combo_poi
-                or requested in combo_poi
-                or combo_poi in requested
-                for requested in normalized_pois
-            )
-
-            daypart_ok = any(
-                requested == combo_daypart
-                for requested in normalized_dayparts
-            )
-
-            if location_ok and poi_ok and daypart_ok:
+        def poi_matches(combo_poi):
+            if not requested_pois:
                 return True
 
-        return False
+            for poi in requested_pois:
+                if combo_poi == poi:
+                    return True
+
+                # Normalize common aliases.
+                if poi in {"coffee", "coffee shop"} and combo_poi in {"cafe", "coffee shop"}:
+                    return True
+
+                if poi == "restaurant" and (
+                    combo_poi == "restaurant" or combo_poi.endswith(" restaurant")
+                ):
+                    return True
+
+            return False
+
+        def daypart_matches(combo_daypart):
+            if not requested_dayparts:
+                return True
+            return combo_daypart in requested_dayparts
+
+        # If no location was requested, any exact category/daypart-safe combo is enough.
+        if not requested_locations:
+            return any(
+                poi_matches(combo["poi"]) and daypart_matches(combo["daypart"])
+                for combo in normalized_combos
+            )
+
+        # Critical rule: every requested location must have the requested category/daypart.
+        for requested_location in requested_locations:
+            location_has_exact_safe_combo = any(
+                combo["location"] == requested_location
+                and poi_matches(combo["poi"])
+                and daypart_matches(combo["daypart"])
+                for combo in normalized_combos
+            )
+
+            if not location_has_exact_safe_combo:
+                return False
+
+        return True
 
     def _safe_location_available(self, location: str, available_locations: set[str]) -> bool:
         requested = self._match_norm(location)

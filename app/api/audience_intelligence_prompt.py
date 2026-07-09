@@ -44,7 +44,12 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     lines.append("## Summary")
     lines.append("")
     lines.append(f"Source mode: {result.get('source_mode')}")
-    lines.append(f"Source rows checked: {result.get('source_rows')}")
+    source_rows_checked = (
+        result.get("source_rows")
+        or ((result.get("v2_autonomous") or {}).get("data_freshness") or {}).get("source_rows_checked")
+        or "unknown"
+    )
+    lines.append(f"Source rows checked: {source_rows_checked}")
     lines.append(f"Prompt-selected cohorts: {result.get('prompt_selected_cohorts')}")
     lines.append(f"Exported audiences: {result.get('safe_export', {}).get('exported_cohorts')}")
     lines.append(f"Lookalike pairs: {result.get('safe_export', {}).get('exported_lookalike_pairs')}")
@@ -110,10 +115,15 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
 
         lines.append("")
 
-    export_outputs = result.get("safe_export", {}).get("outputs", {})
-    cohorts_path = Path(export_outputs.get("safe_export_cohorts", ""))
+    export_outputs = result.get("safe_export", {}).get("outputs", {}) or {}
+    cohorts_path_value = export_outputs.get("safe_export_cohorts")
 
-    if cohorts_path.exists():
+    if cohorts_path_value:
+        cohorts_path = Path(str(cohorts_path_value))
+    else:
+        cohorts_path = None
+
+    if cohorts_path and cohorts_path.is_file():
         cohorts = pd.read_csv(cohorts_path)
         lines.append("## Created approval-gated audiences")
         lines.append("")
@@ -126,6 +136,11 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
             lines.append(f"   - Quality: {float(row.get('management_quality_score', 0)):.3f}")
             lines.append(f"   - Status: {row.get('export_status')}")
             lines.append("")
+    else:
+        lines.append("## Created approval-gated audiences")
+        lines.append("")
+        lines.append("No approval-gated audience file was created for this run.")
+        lines.append("")
 
     privacy = result.get("privacy_guarantees", {})
 
@@ -169,28 +184,32 @@ def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
         business_summary_path = Path(result["run_dir"]) / "business_prompt_summary.md"
         business_summary_path.write_text(business_summary)
 
+        safe_export = result.get("safe_export", {}) or {}
+
         return {
-            "status": result["status"],
-            "run_id": result["run_id"],
+            "status": result.get("status"),
+            "run_id": result.get("run_id"),
             "source_mode": result.get("source_mode"),
-            "source_rows": result.get("source_rows"),
+            "source_rows": result.get("source_rows")
+            or ((result.get("v2_autonomous") or {}).get("data_freshness") or {}).get("source_rows_checked"),
             "privacy_cohorts": result.get("privacy_cohorts"),
             "business_summary": business_summary,
             "business_summary_path": str(business_summary_path),
-            "final_summary_path": result["final_summary_path"],
-            "run_dir": result["run_dir"],
-            "prompt_selected_cohorts": result["prompt_selected_cohorts"],
+            "final_summary_path": result.get("final_summary_path"),
+            "run_dir": result.get("run_dir"),
+            "prompt_selected_cohorts": result.get("prompt_selected_cohorts", 0),
+            "prompt_filter_report": result.get("prompt_filter_report", {}),
             "coverage_warnings": result.get("coverage_warnings", []),
             "v2_autonomous": result.get("v2_autonomous", {}),
             "v2_swarm_review": result.get("v2_swarm_review", {}),
             "safe_export": {
-                "approval_status": result["safe_export"]["approval_status"],
-                "downstream_export_enabled": result["safe_export"]["downstream_export_enabled"],
-                "exported_cohorts": result["safe_export"]["exported_cohorts"],
-                "exported_lookalike_pairs": result["safe_export"]["exported_lookalike_pairs"],
-                "outputs": result["safe_export"]["outputs"],
+                "approval_status": safe_export.get("approval_status"),
+                "downstream_export_enabled": safe_export.get("downstream_export_enabled", False),
+                "exported_cohorts": safe_export.get("exported_cohorts", 0),
+                "exported_lookalike_pairs": safe_export.get("exported_lookalike_pairs", 0),
+                "outputs": safe_export.get("outputs", {}),
             },
-            "privacy_guarantees": result["privacy_guarantees"],
+            "privacy_guarantees": result.get("privacy_guarantees", {}),
         }
 
     except Exception as exc:
