@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.agents.audience_intelligence_orchestrator_agent import AudienceIntelligenceOrchestratorAgent
+from app.services.audience_run_history_service import AudienceRunHistoryService
 
 from app.core.api_key_auth import require_audience_api_key
 
@@ -184,6 +185,12 @@ def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
         business_summary_path = Path(result["run_dir"]) / "business_prompt_summary.md"
         business_summary_path.write_text(business_summary)
 
+        result["business_summary_path"] = str(business_summary_path)
+        result["business_summary"] = business_summary
+
+        run_history = AudienceRunHistoryService().persist_run(final_summary=result)
+        result["run_history"] = run_history
+
         safe_export = result.get("safe_export", {}) or {}
 
         return {
@@ -210,6 +217,7 @@ def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
                 "outputs": safe_export.get("outputs", {}),
             },
             "privacy_guarantees": result.get("privacy_guarantees", {}),
+            "run_history": result.get("run_history", {}),
         }
 
     except Exception as exc:

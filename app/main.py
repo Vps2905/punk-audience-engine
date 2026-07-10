@@ -92,6 +92,10 @@ app.include_router(audience_intelligence_prompt_router)
 from app.api.audience_intelligence_jobs import router as audience_intelligence_jobs_router
 app.include_router(audience_intelligence_jobs_router)
 
+
+from app.api.audience_intelligence_run_history import router as audience_intelligence_run_history_router
+app.include_router(audience_intelligence_run_history_router)
+
 from app.api.audience_intelligence_modules import router as audience_intelligence_modules_router
 app.include_router(audience_intelligence_modules_router)
 
