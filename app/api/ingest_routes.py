@@ -1,9 +1,11 @@
-from fastapi import APIRouter, File, UploadFile, Query
+from fastapi import APIRouter, Depends, File, UploadFile, Query
 
 from app.services.ingestion_service import ingest_csv, get_job_status
+from app.core.api_key_auth import require_audience_api_key
 
 
-router = APIRouter(tags=["Module 1 - Ingestion & Privacy"])
+
+router = APIRouter(tags=["Module 1 - Ingestion & Privacy"], dependencies=[Depends(require_audience_api_key)])
 
 
 @router.post("/ingest")

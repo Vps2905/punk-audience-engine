@@ -11,6 +11,7 @@ from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from app.agents.maid_extraction_execution_agent import MaidExtractionExecutionAgent
+from app.agents.synthetic_engine_agent import SyntheticEngineAgent
 
 
 class MaidSwarmPipelineAgent:
@@ -88,14 +89,22 @@ class MaidSwarmPipelineAgent:
 
         cohorts.to_csv(metadata_path, index=False)
 
-        # 4. Synthetic safe seed generation
-        synthetic = self._generate_synthetic_seeds(
+        # 4. Synthetic safe seed generation through hardened Module 2 engine.
+        synthetic_result = SyntheticEngineAgent().generate(
             cohorts=cohorts,
+            output_dir=run_dir,
+            run_id=f"{run_id}_synthetic",
+            engine_requested="dp_aggregate",
+            production_mode=True,
+            allow_fallback=False,
             synthetic_rows=synthetic_rows,
+            epsilon=epsilon,
+            k_min=k_min,
         )
 
-        synthetic_path = run_dir / "synthetic_safe_seed_profiles.csv"
-        synthetic.to_csv(synthetic_path, index=False)
+        synthetic_path = Path(synthetic_result["outputs"]["synthetic_csv"])
+        synthetic_manifest_path = Path(synthetic_result["outputs"]["synthetic_manifest"])
+        synthetic = pd.read_csv(synthetic_path)
 
         # 5. Meta-safe export package
         export_manifest = {
@@ -114,6 +123,8 @@ class MaidSwarmPipelineAgent:
                 "safe_cohort_metadata": str(metadata_path),
                 "cohort_vectors": str(vectors_path),
                 "synthetic_safe_seed_profiles": str(synthetic_path),
+                "synthetic_manifest": str(synthetic_manifest_path),
+                "synthetic_manifest": str(synthetic_manifest_path),
             },
         }
 
@@ -141,6 +152,7 @@ class MaidSwarmPipelineAgent:
                 "safe_cohort_count": int(len(cohorts)),
                 "cluster_count": int(cluster_count),
                 "synthetic_rows": int(len(synthetic)),
+                "synthetic_engine": synthetic_result.get("engine_used"),
                 "top_clusters": cohorts.groupby("cluster_id").size().to_dict(),
                 "top_cohorts": cohorts.head(10).to_dict(orient="records"),
             },
@@ -179,6 +191,12 @@ class MaidSwarmPipelineAgent:
         cohorts: pd.DataFrame,
         synthetic_rows: int,
     ) -> pd.DataFrame:
+        raise RuntimeError(
+            "Legacy MaidSwarm synthetic sampler is disabled. "
+            "Use SyntheticEngineAgent with engine_requested='dp_aggregate', "
+            "production_mode=True, and allow_fallback=False."
+        )
+
         weights = cohorts["noisy_maid_volume"].fillna(1).astype(float)
         weights = weights.clip(lower=1)
         probabilities = weights / weights.sum()

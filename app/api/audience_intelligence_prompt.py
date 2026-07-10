@@ -67,6 +67,24 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     lines.append(f"Dayparts detected: {', '.join(filter_report.get('dayparts_detected', []) or ['none'])}")
     lines.append("")
 
+    filter_mode_for_safety = str(filter_report.get("filter_mode") or "")
+    if filter_mode_for_safety == "privacy_identifier_request_blocked":
+        lines.append("## Safety decision")
+        lines.append("")
+        lines.append(
+            "This request asked for raw MAIDs, device IDs, or individual-level user data. "
+            "Those cannot be provided or exported. Only privacy-safe aggregated cohorts are allowed."
+        )
+        lines.append("")
+    elif filter_mode_for_safety == "export_action_requires_existing_audience":
+        lines.append("## Safety decision")
+        lines.append("")
+        lines.append(
+            "This was an export-action-only request. The system will not create or export a new audience "
+            "without an existing selected run/audience and manual approval."
+        )
+        lines.append("")
+
     filter_report = result.get("prompt_filter_report", {}) or {}
     filter_mode = str(filter_report.get("filter_mode") or "")
 
@@ -154,7 +172,22 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     lines.append(f"Email/phone exported: {privacy.get('raw_email_exported')} / {privacy.get('raw_phone_exported')}")
     lines.append(f"Individual user data exported: {privacy.get('individual_user_data_exported')}")
     lines.append("")
-    lines.append("Export package is ready for review, but downstream delivery is blocked until approval.")
+
+    safe_export = result.get("safe_export", {}) or {}
+    freshness_status = ((result.get("v2_autonomous") or {}).get("data_freshness") or {}).get("freshness_status")
+    downstream_enabled = bool(safe_export.get("downstream_export_enabled"))
+
+    if not downstream_enabled and str(freshness_status).lower() == "stale":
+        lines.append(
+            "Export package is reviewable, but downstream delivery is blocked because source data is stale and manual approval is required."
+        )
+    elif not downstream_enabled:
+        lines.append(
+            "Export package is reviewable, but downstream delivery is blocked until safety checks and manual approval pass."
+        )
+    else:
+        lines.append("Export package is approved for downstream delivery.")
+
     lines.append("")
     lines.append(f"Run folder: {result.get('run_dir')}")
 

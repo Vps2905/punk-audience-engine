@@ -1415,6 +1415,104 @@ class AudienceIntelligenceOrchestratorAgent:
             ],
         )
 
+    def _vijay_is_gym_intent(self, terms_or_prompt):
+        text = " ".join(terms_or_prompt) if isinstance(terms_or_prompt, (list, tuple, set)) else str(terms_or_prompt)
+        return self._vijay_has_any(
+            text,
+            [
+                "gym",
+                "gyms",
+                "fitness",
+                "fitness center",
+                "fitness centre",
+                "fitness centers",
+                "fitness centres",
+                "health club",
+                "health clubs",
+                "workout",
+                "workouts",
+                "premium gym",
+                "yoga studio",
+                "fitness studio",
+            ],
+        )
+
+    def _vijay_is_bakery_intent(self, terms_or_prompt):
+        text = " ".join(terms_or_prompt) if isinstance(terms_or_prompt, (list, tuple, set)) else str(terms_or_prompt)
+        return self._vijay_has_any(
+            text,
+            [
+                "bakery",
+                "bakeries",
+                "baked goods",
+                "pastry",
+                "pastries",
+                "bread",
+                "dessert shop",
+                "desserts",
+            ],
+        )
+
+    def _is_raw_identifier_request(self, prompt):
+        text = self._vijay_norm_text(prompt)
+        return self._vijay_has_any(
+            text,
+            [
+                "raw maid",
+                "raw maids",
+                "maid ids",
+                "maid id",
+                "device id",
+                "device ids",
+                "individual device",
+                "individual device ids",
+                "individual user",
+                "individual users",
+                "person level",
+                "user level",
+                "give me ids",
+                "export ids",
+            ],
+        )
+
+    def _is_export_action_only_request(self, prompt, locations=None, poi_terms=None, dayparts=None):
+        text = self._vijay_norm_text(prompt)
+        export_action = self._vijay_has_any(
+            text,
+            [
+                "export",
+                "upload",
+                "send to meta",
+                "meta immediately",
+                "without manual approval",
+                "immediately without approval",
+                "push to meta",
+            ],
+        )
+
+        if not export_action:
+            return False
+
+        has_targeting_intent = bool(locations or poi_terms or dayparts)
+        has_business_intent = self._vijay_has_any(
+            text,
+            [
+                "coffee",
+                "cafe",
+                "restaurant",
+                "shawarma",
+                "bakery",
+                "gym",
+                "fitness",
+                "retail",
+                "store",
+                "coworking",
+                "office",
+            ],
+        )
+
+        return not has_targeting_intent and not has_business_intent
+
     def _allowed_export_poi_terms_for_request(self, poi_terms):
         terms = [self._vijay_norm_text(t) for t in (poi_terms or [])]
         joined = " ".join(terms)
@@ -1422,6 +1520,29 @@ class AudienceIntelligenceOrchestratorAgent:
         coffee = self._vijay_is_coffee_intent(joined)
         restaurant = self._vijay_is_restaurant_intent(joined)
         retail = self._vijay_is_retail_intent(joined)
+        gym = self._vijay_is_gym_intent(joined)
+        bakery = self._vijay_is_bakery_intent(joined)
+
+        if gym:
+            return [
+                "gym",
+                "fitness",
+                "fitness_center",
+                "fitness_centre",
+                "health_club",
+                "sports_club",
+                "yoga_studio",
+                "fitness_studio",
+            ]
+
+        if bakery:
+            return [
+                "bakery",
+                "cafe",
+                "coffee_shop",
+                "food",
+                "restaurant",
+            ]
 
         # Coffee/cafe is narrow. If restaurant was also explicitly detected,
         # allow food-related POIs, but never mall/retail fallback unless mall intent is explicit.
@@ -1488,6 +1609,12 @@ class AudienceIntelligenceOrchestratorAgent:
         # not office/coworking audience.
         if self._vijay_is_coffee_intent(text):
             return ["cafe", "coffee", "coffee_shop"]
+
+        if self._vijay_is_bakery_intent(text):
+            return ["bakery", "cafe", "food"]
+
+        if self._vijay_is_gym_intent(text):
+            return ["gym", "fitness", "fitness_center"]
 
         if self._vijay_has_any(text, ["casino", "casinos", "gaming venues", "gaming venue", "tourist entertainment"]):
             return ["casino", "gaming_venue", "tourist_attraction", "entertainment"]
@@ -1844,6 +1971,42 @@ class AudienceIntelligenceOrchestratorAgent:
         locations = self._extract_location_terms(prompt, cohorts)
         poi_terms = self._extract_poi_terms(prompt)
         dayparts = self._extract_daypart_terms_for_prompt(prompt)
+
+        if self._is_raw_identifier_request(prompt):
+            empty = cohorts.iloc[0:0].copy()
+            return empty, {
+                "enabled": True,
+                "filter_mode": "privacy_identifier_request_blocked",
+                "block_export": True,
+                "export_blocked": True,
+                "downstream_export_enabled": False,
+                "reason": "raw_identifier_request_blocked",
+                "locations_detected": locations,
+                "poi_terms_detected": poi_terms,
+                "dayparts_detected": dayparts,
+                "coverage_warnings": [
+                    "Raw MAIDs, device IDs, and individual-level user data cannot be exported. Only privacy-safe aggregated cohorts are allowed."
+                ],
+                "selected_count": 0,
+            }
+
+        if self._is_export_action_only_request(prompt, locations=locations, poi_terms=poi_terms, dayparts=dayparts):
+            empty = cohorts.iloc[0:0].copy()
+            return empty, {
+                "enabled": True,
+                "filter_mode": "export_action_requires_existing_audience",
+                "block_export": True,
+                "export_blocked": True,
+                "downstream_export_enabled": False,
+                "reason": "export_requires_existing_approved_audience",
+                "locations_detected": locations,
+                "poi_terms_detected": poi_terms,
+                "dayparts_detected": dayparts,
+                "coverage_warnings": [
+                    "Export requests require an existing selected audience/run and manual approval. No new audience was generated from an action-only prompt."
+                ],
+                "selected_count": 0,
+            }
 
         report = {
             "enabled": True,

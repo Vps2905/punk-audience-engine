@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
+from app.services.privacy_budget_ledger_service import PrivacyBudgetLedgerService, PrivacyBudgetRequest
 
 
 class AudienceRunHistoryService:
@@ -411,7 +412,10 @@ class AudienceRunHistoryService:
 
             run = self._row_to_dict(row)
             previous_status = run.get("approval_status")
-            exported_cohorts = self._safe_int(run.get("exported_cohorts")) or 0
+            exported_cohorts = max(
+                self._safe_int(run.get("exported_cohorts")) or 0,
+                self._exportable_cohort_count_conn(conn, run_id) or 0,
+            )
 
             if action == "approved":
                 final_summary = run.get("final_summary") or {}
@@ -475,6 +479,130 @@ class AudienceRunHistoryService:
                         "blockers": blockers,
                         "meta_upload_performed": False,
                     }
+
+                if action == "approved":
+                    if previous_status and str(previous_status).startswith("blocked"):
+                        self._record_event_conn(
+                            conn,
+                            run_id=run_id,
+                            event_type="approval_blocked",
+                            actor=actor,
+                            details={
+                                "reason": "blocked_runs_cannot_be_approved",
+                                "previous_status": previous_status,
+                                "note": note,
+                            },
+                        )
+                        return {
+                            "enabled": True,
+                            "status": "blocked",
+                            "run_id": run_id,
+                            "reason": "blocked_runs_cannot_be_approved",
+                            "previous_status": previous_status,
+                        }
+
+                    if exported_cohorts <= 0:
+                        self._record_event_conn(
+                            conn,
+                            run_id=run_id,
+                            event_type="approval_blocked",
+                            actor=actor,
+                            details={
+                                "reason": "no_exported_cohorts_to_approve",
+                                "previous_status": previous_status,
+                                "note": note,
+                            },
+                        )
+                        return {
+                            "enabled": True,
+                            "status": "blocked",
+                            "run_id": run_id,
+                            "reason": "no_exported_cohorts_to_approve",
+                            "previous_status": previous_status,
+                        }
+
+                privacy_budget_result = PrivacyBudgetLedgerService(
+                    database_url=db_url
+                ).check_and_record(
+                    self._privacy_budget_request_for_run(
+                        run_id=run_id,
+                        run=run,
+                        actor=actor,
+                        note=note,
+                    )
+                )
+
+                if privacy_budget_result.get("status") == "blocked":
+                    blocked_status = "blocked_privacy_budget"
+
+                    self._record_event_conn(
+                        conn,
+                        run_id=run_id,
+                        event_type="privacy_budget_blocked",
+                        actor=actor,
+                        details={
+                            "note": note,
+                            "previous_status": previous_status,
+                            "new_status": blocked_status,
+                            "downstream_export_enabled": False,
+                            "privacy_budget": privacy_budget_result,
+                        },
+                    )
+
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE audience_run_history
+                            SET approval_status = :approval_status,
+                                downstream_export_enabled = false,
+                                updated_at = now()
+                            WHERE run_id = :run_id
+                            """
+                        ),
+                        {
+                            "run_id": run_id,
+                            "approval_status": blocked_status,
+                        },
+                    )
+
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE audience_run_cohorts
+                            SET approval_status = :approval_status
+                            WHERE run_id = :run_id
+                            """
+                        ),
+                        {
+                            "run_id": run_id,
+                            "approval_status": blocked_status,
+                        },
+                    )
+
+                    return {
+                        "enabled": True,
+                        "status": "blocked",
+                        "run_id": run_id,
+                        "previous_status": previous_status,
+                        "approval_status": blocked_status,
+                        "downstream_export_enabled": False,
+                        "actor": actor,
+                        "note": note,
+                        "blockers": ["Privacy budget exceeded."],
+                        "privacy_budget": privacy_budget_result,
+                        "meta_upload_performed": False,
+                    }
+
+                self._record_event_conn(
+                    conn,
+                    run_id=run_id,
+                    event_type="privacy_budget_spent",
+                    actor=actor,
+                    details={
+                        "note": note,
+                        "privacy_budget": privacy_budget_result,
+                    },
+                )
 
             if action == "approved":
                 if previous_status and str(previous_status).startswith("blocked"):
@@ -631,6 +759,89 @@ class AudienceRunHistoryService:
             "note": note,
             "meta_upload_performed": False,
         }
+
+
+    def _exportable_cohort_count_conn(self, conn, run_id: str) -> int:
+        """
+        Count persisted cohorts for approval eligibility.
+
+        Production reason:
+        Some runs persist selected/exportable cohorts in audience_run_cohorts
+        even when final_summary.exported_cohorts is missing or zero.
+        Approval should use actual persisted cohort rows as the source of truth.
+        """
+        value = conn.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM audience_run_cohorts
+                WHERE run_id = :run_id
+                """
+            ),
+            {"run_id": run_id},
+        ).scalar()
+
+        return int(value or 0)
+
+    def _privacy_budget_request_for_run(
+        self,
+        *,
+        run_id: str,
+        run: Dict[str, Any],
+        actor: str,
+        note: Optional[str],
+    ) -> PrivacyBudgetRequest:
+        """
+        Build privacy budget request for an approved export.
+
+        Production rule:
+        Every approved export spends epsilon. If the budget is exhausted,
+        approval/export must be blocked.
+
+        Defaults are intentionally conservative and can be overridden later
+        from final_summary["privacy_budget"].
+        """
+        final_summary = run.get("final_summary") or {}
+        privacy_budget = final_summary.get("privacy_budget") or {}
+
+        safe_export = final_summary.get("safe_export") or {}
+        prompt_filter_report = final_summary.get("prompt_filter_report") or {}
+
+        locations = prompt_filter_report.get("locations_detected") or run.get("locations_detected") or []
+        poi_terms = prompt_filter_report.get("poi_terms_detected") or run.get("poi_terms_detected") or []
+        dayparts = prompt_filter_report.get("dayparts_detected") or run.get("dayparts_detected") or []
+
+        scope_parts = [
+            "audience_export",
+            ",".join(str(item).lower().strip() for item in locations) or "unknown_location",
+            ",".join(str(item).lower().strip() for item in poi_terms) or "unknown_poi",
+            ",".join(str(item).lower().strip() for item in dayparts) or "unknown_daypart",
+        ]
+
+        budget_scope = str(
+            privacy_budget.get("budget_scope")
+            or safe_export.get("budget_scope")
+            or "|".join(scope_parts)
+        )
+
+        epsilon = float(privacy_budget.get("epsilon", safe_export.get("epsilon", 1.0)))
+        delta = float(privacy_budget.get("delta", safe_export.get("delta", 1e-5)))
+        sensitivity = float(privacy_budget.get("sensitivity", safe_export.get("sensitivity", 1.0)))
+        max_budget = float(privacy_budget.get("max_budget", safe_export.get("max_budget", 5.0)))
+
+        return PrivacyBudgetRequest(
+            run_id=run_id,
+            cohort_id=None,
+            budget_scope=budget_scope,
+            epsilon=epsilon,
+            delta=delta,
+            sensitivity=sensitivity,
+            max_budget=max_budget,
+            mechanism=str(privacy_budget.get("mechanism") or safe_export.get("mechanism") or "gaussian"),
+            query_type="audience_export_approval",
+            actor=actor,
+            note=note,
+        )
 
     def _db_url(self) -> str | None:
         return (

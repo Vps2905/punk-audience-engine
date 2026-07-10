@@ -43,6 +43,193 @@ class ApprovalRequest(BaseModel):
     note: Optional[str] = None
 
 
+def _job_nested_get(data: Any, *path: str) -> Any:
+    current = data
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _job_norm(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _job_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return _job_norm(value) in {"true", "1", "yes", "y"}
+
+
+def _job_collect_warning_text(*sources: Any) -> list[str]:
+    warnings: list[str] = []
+    for source in sources:
+        if not source:
+            continue
+        if isinstance(source, str):
+            warnings.append(source)
+        elif isinstance(source, list):
+            warnings.extend(str(item) for item in source if item)
+        elif isinstance(source, dict):
+            for key in ["coverage_warnings", "warnings", "approval_blockers", "blockers"]:
+                value = source.get(key)
+                if isinstance(value, str):
+                    warnings.append(value)
+                elif isinstance(value, list):
+                    warnings.extend(str(item) for item in value if item)
+    return warnings
+
+
+def _collect_job_approval_blockers(
+    *,
+    result: Dict[str, Any],
+    manifest: Dict[str, Any],
+    payload: Dict[str, Any],
+    approval: Dict[str, Any],
+    cohorts: pd.DataFrame,
+) -> list[str]:
+    """
+    Final approval safety gate for async job approval.
+
+    Manual approval should only unlock downstream export when the package is
+    otherwise safe: fresh enough, non-empty, privacy-safe, and not already
+    blocked by prompt/category/freshness guardrails.
+    """
+    blockers: list[str] = []
+    result = result or {}
+    manifest = manifest or {}
+    payload = payload or {}
+    approval = approval or {}
+
+    safe_export = result.get("safe_export") or {}
+
+    if cohorts is None or cohorts.empty:
+        blockers.append("No exportable cohorts exist for this job.")
+
+    blocked_statuses = {
+        "blocked",
+        "blocked_approval",
+        "blocked_no_safe_exact_match",
+        "blocked_privacy_budget",
+        "blocked_privacy_leak",
+        "blocked_source_freshness",
+        "failed",
+        "rejected",
+    }
+
+    status_sources = {
+        "result.safe_export": safe_export.get("approval_status"),
+        "manifest": manifest.get("approval_status"),
+        "payload": payload.get("approval_status"),
+        "approval_request": approval.get("approval_status"),
+    }
+
+    for source, status in status_sources.items():
+        status_norm = _job_norm(status)
+        if status_norm in blocked_statuses:
+            blockers.append(f"{source} approval_status is {status_norm}.")
+
+    freshness_values = [
+        _job_nested_get(result, "v2_autonomous", "data_freshness", "freshness_status"),
+        _job_nested_get(result, "data_freshness", "freshness_status"),
+        _job_nested_get(safe_export, "data_freshness", "freshness_status"),
+        _job_nested_get(manifest, "v2_autonomous", "data_freshness", "freshness_status"),
+        _job_nested_get(manifest, "data_freshness", "freshness_status"),
+        manifest.get("freshness"),
+        manifest.get("freshness_status"),
+        _job_nested_get(payload, "data_freshness", "freshness_status"),
+        payload.get("freshness"),
+        payload.get("freshness_status"),
+        _job_nested_get(approval, "data_freshness", "freshness_status"),
+        approval.get("freshness"),
+        approval.get("freshness_status"),
+    ]
+
+    if any(_job_norm(value) == "stale" for value in freshness_values):
+        blockers.append("Source data is stale; refresh or verify source data before approval.")
+
+    swarm_values = [
+        _job_nested_get(result, "v2_swarm_review", "overall_review_status"),
+        result.get("swarm_review_status"),
+        _job_nested_get(manifest, "v2_swarm_review", "overall_review_status"),
+        manifest.get("swarm_review_status"),
+        payload.get("swarm_review_status"),
+        approval.get("swarm_review_status"),
+    ]
+
+    if any(_job_norm(value) == "blocked" for value in swarm_values):
+        blockers.append("Swarm review is blocked.")
+
+    prompt_filter_report = (
+        result.get("prompt_filter_report")
+        or manifest.get("prompt_filter_report")
+        or payload.get("prompt_filter_report")
+        or approval.get("prompt_filter_report")
+        or {}
+    )
+
+    blocked_filter_modes = {
+        "location_category_gap_no_export",
+        "broad_location_no_export",
+        "privacy_identifier_request_blocked",
+        "export_action_requires_existing_audience",
+    }
+
+    filter_mode = _job_norm(prompt_filter_report.get("filter_mode"))
+    if filter_mode in blocked_filter_modes:
+        blockers.append(f"Prompt filter mode blocks approval: {filter_mode}.")
+
+    privacy_sources = [
+        result.get("privacy_guarantees") or {},
+        safe_export.get("privacy_guarantees") or {},
+        manifest.get("privacy_guarantees") or {},
+        payload.get("privacy_guarantees") or {},
+        approval.get("privacy_guarantees") or {},
+    ]
+
+    privacy_flags = [
+        "raw_maids_exported",
+        "hashed_identifiers_exported",
+        "raw_observations_exported",
+        "raw_lat_lng_exported",
+        "raw_email_exported",
+        "raw_phone_exported",
+        "individual_user_data_exported",
+    ]
+
+    for source in privacy_sources:
+        for flag in privacy_flags:
+            if _job_bool(source.get(flag)):
+                blockers.append(f"Privacy flag blocks approval: {flag}=true.")
+
+    warning_text = " ".join(
+        _job_collect_warning_text(result, safe_export, manifest, payload, approval, prompt_filter_report)
+    ).lower()
+
+    warning_block_terms = [
+        "export blocked",
+        "blocked instead of falling back",
+        "no exact safe cohort",
+        "cannot be exported",
+        "raw maids",
+        "device ids",
+        "individual-level user data",
+    ]
+
+    if any(term in warning_text for term in warning_block_terms):
+        blockers.append("Coverage/privacy warnings require review before approval.")
+
+    deduped: list[str] = []
+    for blocker in blockers:
+        if blocker not in deduped:
+            deduped.append(blocker)
+
+    return deduped
+
+
 def _run_job_background(job_id: str) -> None:
     record = job_store.get(job_id)
     payload = record["payload"]
@@ -189,6 +376,63 @@ def approve_job_export(job_id: str, request: ApprovalRequest) -> Dict[str, Any]:
     approval = json.loads(approval_path.read_text())
     cohorts = pd.read_csv(cohorts_path)
 
+    approval_blockers = _collect_job_approval_blockers(
+        result=result,
+        manifest=manifest,
+        payload=payload,
+        approval=approval,
+        cohorts=cohorts,
+    )
+
+    if approval_blockers:
+        blocked_at = datetime.now(timezone.utc).isoformat()
+        approval_decision = {
+            "job_id": job_id,
+            "run_dir": str(run_dir_path),
+            "approval_status": "blocked_approval",
+            "approved_at": None,
+            "approved_by": request.approver,
+            "note": request.note,
+            "downstream_export_enabled": False,
+            "meta_upload_performed": False,
+            "approval_blockers": approval_blockers,
+            "blocked_at": blocked_at,
+            "message": "Export approval blocked by safety checks.",
+        }
+
+        approval_decision_path.write_text(json.dumps(approval_decision, indent=2, allow_nan=False))
+
+        manifest["approval_status"] = "blocked_approval"
+        manifest["downstream_export_enabled"] = False
+        manifest["export_blocked_until_approved"] = True
+        manifest["approval_blockers"] = approval_blockers
+        manifest["blocked_at"] = blocked_at
+
+        payload["approval_status"] = "blocked_approval"
+        payload["downstream_export_enabled"] = False
+        payload["approval_blockers"] = approval_blockers
+
+        approval["approval_status"] = "blocked_approval"
+        approval["export_blocked_until_approved"] = True
+        approval["review_required_before_downstream_delivery"] = True
+        approval["approval_blockers"] = approval_blockers
+        approval["blocked_at"] = blocked_at
+
+        manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False))
+        payload_path.write_text(json.dumps(payload, indent=2, allow_nan=False))
+        approval_path.write_text(json.dumps(approval, indent=2, allow_nan=False))
+
+        if isinstance(result.get("safe_export"), dict):
+            result["safe_export"]["approval_status"] = "blocked_approval"
+            result["safe_export"]["downstream_export_enabled"] = False
+            result["safe_export"]["approval_blockers"] = approval_blockers
+
+        result["approval_decision_path"] = str(approval_decision_path)
+        record["result"] = result
+        job_store.save(record)
+
+        raise HTTPException(status_code=400, detail=approval_decision)
+
     manifest["approval_status"] = "approved"
     manifest["downstream_export_enabled"] = True
     manifest["export_blocked_until_approved"] = False
@@ -247,6 +491,9 @@ def _safe_result_for_job(result: Dict[str, Any]) -> Dict[str, Any]:
         "source_rows": result.get("source_rows"),
         "prompt_selected_cohorts": result.get("prompt_selected_cohorts"),
         "coverage_warnings": result.get("coverage_warnings", []),
+        "prompt_filter_report": result.get("prompt_filter_report"),
+        "v2_autonomous": result.get("v2_autonomous"),
+        "v2_swarm_review": result.get("v2_swarm_review"),
         "business_summary": result.get("business_summary"),
         "business_summary_path": result.get("business_summary_path"),
         "final_summary_path": result.get("final_summary_path"),

@@ -1,7 +1,7 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 from uuid import uuid4
 
 import numpy as np
@@ -17,15 +17,21 @@ UNSAFE_KEYWORDS = [
     "email",
     "phone",
     "device",
-    "maid",
     "client_id",
     "hash",
     "raw",
     "lat",
     "lon",
     "latitude",
-    "longitude"
+    "longitude",
 ]
+
+# Aggregate MAID volume is allowed because it is cohort-level, not a raw MAID/id.
+ALLOWED_AGGREGATE_COLUMNS = {
+    "total_maid_volume",
+    "noisy_maid_volume",
+    "safe_maid_volume",
+}
 
 
 def processed_path_for_job(job_id: str) -> Path:
@@ -35,9 +41,29 @@ def processed_path_for_job(job_id: str) -> Path:
 def is_safe_column(column_name: str) -> bool:
     """
     Blocks columns that may expose individual-level information.
+
+    Cohort-level aggregate MAID volume columns are allowed because they do not
+    contain raw MAIDs or per-device identifiers.
     """
-    col = str(column_name).lower()
+    col = str(column_name).lower().strip()
+
+    if col in ALLOWED_AGGREGATE_COLUMNS:
+        return True
+
+    if col in {"maid", "maids", "maid_id", "maid_ids", "raw_maids", "raw_maid"}:
+        return False
+
     return not any(keyword in col for keyword in UNSAFE_KEYWORDS)
+
+
+def unsafe_columns(df: pd.DataFrame) -> List[str]:
+    return [str(col) for col in df.columns if not is_safe_column(str(col))]
+
+
+def validate_no_unsafe_columns(df: pd.DataFrame, context: str) -> None:
+    bad = unsafe_columns(df)
+    if bad:
+        raise ValueError(f"Unsafe synthetic {context} columns blocked: {bad}")
 
 
 def safe_trait_columns(df: pd.DataFrame) -> List[str]:
@@ -45,10 +71,8 @@ def safe_trait_columns(df: pd.DataFrame) -> List[str]:
     Selects only safe columns for synthetic generation.
     """
     blocked_exact = {
-        "cohort_size",
-        "noisy_count",
         "privacy_status",
-        "k_min"
+        "k_min",
     }
 
     return [
@@ -63,7 +87,7 @@ def build_segment_label(row: Dict[str, Any]) -> str:
     """
     parts = []
 
-    for key in ["city", "interest", "visit_time", "affinity", "age_group"]:
+    for key in ["city", "interest", "visit_time", "affinity", "age_group", "location_name", "primary_poi_type"]:
         value = row.get(key)
         if value is not None and str(value).strip() != "":
             parts.append(str(value))
@@ -73,14 +97,16 @@ def build_segment_label(row: Dict[str, Any]) -> str:
 
 def fallback_synthetic_from_aggregates(
     df: pd.DataFrame,
-    num_rows: int
+    num_rows: int,
 ) -> pd.DataFrame:
     """
-    Privacy-safe fallback synthetic generator.
+    Privacy-safe aggregate sampler.
 
-    It does not create individual real users.
-    It samples from aggregated cohort rows and creates fake seed profiles.
+    This does not create individual real users. It samples from privacy-safe
+    aggregated cohort rows and creates synthetic seed profiles.
     """
+    validate_no_unsafe_columns(df, context="source")
+
     trait_cols = safe_trait_columns(df)
 
     if not trait_cols:
@@ -89,9 +115,13 @@ def fallback_synthetic_from_aggregates(
     weights = None
 
     if "noisy_count" in df.columns:
-        weights = df["noisy_count"].fillna(1).astype(float).values
+        weights = pd.to_numeric(df["noisy_count"], errors="coerce").fillna(1).astype(float).values
     elif "cohort_size" in df.columns:
-        weights = df["cohort_size"].fillna(1).astype(float).values
+        weights = pd.to_numeric(df["cohort_size"], errors="coerce").fillna(1).astype(float).values
+    elif "noisy_maid_volume" in df.columns:
+        weights = pd.to_numeric(df["noisy_maid_volume"], errors="coerce").fillna(1).astype(float).values
+    elif "total_maid_volume" in df.columns:
+        weights = pd.to_numeric(df["total_maid_volume"], errors="coerce").fillna(1).astype(float).values
 
     if weights is None or weights.sum() <= 0:
         probabilities = None
@@ -113,21 +143,25 @@ def fallback_synthetic_from_aggregates(
         safe_row["synthetic_segment"] = build_segment_label(safe_row)
         safe_row["synthetic_source"] = "aggregated_privacy_safe_features"
         safe_row["synthetic_rank"] = index + 1
-
-        if "noisy_count" in source_row:
-            safe_row["source_noisy_count"] = source_row.get("noisy_count")
+        safe_row["privacy_mode"] = "aggregated_synthetic_only"
+        safe_row["approval_status"] = "pending_approval"
 
         synthetic_rows.append(safe_row)
 
-    return pd.DataFrame(synthetic_rows)
+    synthetic_df = pd.DataFrame(synthetic_rows)
+    validate_no_unsafe_columns(synthetic_df, context="output")
+    return synthetic_df
 
 
 def try_sdv_synthetic(df: pd.DataFrame, num_rows: int) -> pd.DataFrame:
     """
-    Tries to generate synthetic data using SDV if installed.
+    Dev-only SDV GaussianCopula path.
 
-    If SDV is unavailable or fails, caller will use fallback.
+    This is not allowed in production mode because it is not the approved
+    production DP synthetic provider.
     """
+    validate_no_unsafe_columns(df, context="source")
+
     safe_cols = safe_trait_columns(df)
     safe_df = df[safe_cols].copy()
 
@@ -145,26 +179,58 @@ def try_sdv_synthetic(df: pd.DataFrame, num_rows: int) -> pd.DataFrame:
     synthetic_df["synthetic_profile_id"] = [
         f"synth_{uuid4().hex[:12]}" for _ in range(len(synthetic_df))
     ]
-    synthetic_df["synthetic_source"] = "sdv_gaussian_copula"
+    synthetic_df["synthetic_source"] = "sdv_gaussian_copula_dev_only"
     synthetic_df["synthetic_rank"] = range(1, len(synthetic_df) + 1)
+    synthetic_df["privacy_mode"] = "dev_synthetic_only"
+    synthetic_df["approval_status"] = "pending_approval"
 
+    validate_no_unsafe_columns(synthetic_df, context="output")
     return synthetic_df
+
+
+def _validate_generation_request(
+    *,
+    num_rows: int,
+    use_sdv: bool,
+    production_mode: bool,
+    allow_fallback: bool,
+) -> None:
+    if int(num_rows) <= 0:
+        raise ValueError("num_rows must be greater than 0.")
+
+    if production_mode and allow_fallback:
+        raise ValueError("Production synthetic generation cannot allow fallback engines.")
+
+    if production_mode and use_sdv:
+        raise ValueError(
+            "Legacy SDV Gaussian synthetic generation is dev-only. "
+            "Production must use aggregate-safe generation or SyntheticEngineAgent dp_aggregate."
+        )
 
 
 def generate_synthetic_for_job(
     job_id: str,
     num_rows: int = 1000,
-    use_sdv: bool = True
+    use_sdv: bool = False,
+    production_mode: bool = True,
+    allow_fallback: bool = False,
 ) -> Dict[str, Any]:
     """
-    Main synthetic generation pipeline.
+    Legacy synthetic generation pipeline, now hardened.
 
-    1. Load processed privacy-safe features
-    2. Try SDV if requested
-    3. If SDV fails, use safe aggregated fallback
-    4. Save synthetic CSV
-    5. Save manifest
+    Production behavior:
+    - no SDV Gaussian path
+    - no silent fallback
+    - no unsafe source/output columns
+    - aggregate synthetic seed profiles only
     """
+    _validate_generation_request(
+        num_rows=num_rows,
+        use_sdv=use_sdv,
+        production_mode=production_mode,
+        allow_fallback=allow_fallback,
+    )
+
     processed_path = processed_path_for_job(job_id)
 
     if not processed_path.exists():
@@ -175,41 +241,55 @@ def generate_synthetic_for_job(
     if df.empty:
         raise ValueError("Processed feature table is empty. Cannot generate synthetic data.")
 
-    backend = "fallback_aggregated_sampler"
+    validate_no_unsafe_columns(df, context="source")
+
+    backend = "aggregated_sampler"
     fallback_reason = None
 
     if use_sdv:
         try:
             synthetic_df = try_sdv_synthetic(df, num_rows=num_rows)
-            backend = "sdv_gaussian_copula"
-        except Exception as e:
-            fallback_reason = str(e)
+            backend = "sdv_gaussian_copula_dev_only"
+        except Exception as exc:
+            if not allow_fallback:
+                raise RuntimeError(f"Synthetic generation failed closed. Reason: {exc}") from exc
+            fallback_reason = str(exc)
+            backend = "aggregated_sampler_explicit_dev_fallback"
             synthetic_df = fallback_synthetic_from_aggregates(df, num_rows=num_rows)
     else:
         synthetic_df = fallback_synthetic_from_aggregates(df, num_rows=num_rows)
 
+    validate_no_unsafe_columns(synthetic_df, context="output")
+
     synthetic_path = SYNTHETIC_DIR / f"{job_id}_synthetic.csv"
     manifest_path = SYNTHETIC_DIR / f"{job_id}_synthetic_manifest.json"
 
+    SYNTHETIC_DIR.mkdir(parents=True, exist_ok=True)
     synthetic_df.to_csv(synthetic_path, index=False)
 
     manifest = {
         "job_id": job_id,
-        "created_at": datetime.utcnow().isoformat() + "Z",
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "source_processed_path": str(processed_path),
         "synthetic_path": str(synthetic_path),
-        "num_rows_requested": num_rows,
+        "num_rows_requested": int(num_rows),
         "num_rows_generated": int(len(synthetic_df)),
         "backend": backend,
+        "use_sdv_requested": bool(use_sdv),
+        "production_mode": bool(production_mode),
+        "allow_fallback": bool(allow_fallback),
         "fallback_reason": fallback_reason,
         "privacy_mode": "synthetic_from_aggregated_features",
         "contains_raw_pii": False,
+        "contains_raw_maids": False,
+        "contains_hashed_identifiers": False,
         "contains_individual_user_data": False,
-        "safe_for_export_seed": True
+        "safe_for_export_seed": True,
+        "requires_manual_approval_before_upload": True,
     }
 
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+        json.dump(manifest, f, indent=2, allow_nan=False)
 
     return {
         "status": "completed",
@@ -221,6 +301,12 @@ def generate_synthetic_for_job(
         "num_rows_generated": int(len(synthetic_df)),
         "privacy_mode": "synthetic_from_aggregated_features",
         "contains_raw_pii": False,
+        "contains_raw_maids": False,
+        "contains_hashed_identifiers": False,
+        "contains_individual_user_data": False,
         "safe_for_export_seed": True,
-        "fallback_reason": fallback_reason
+        "requires_manual_approval_before_upload": True,
+        "production_mode": bool(production_mode),
+        "allow_fallback": bool(allow_fallback),
+        "fallback_reason": fallback_reason,
     }

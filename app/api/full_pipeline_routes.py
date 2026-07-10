@@ -1,9 +1,11 @@
-from fastapi import APIRouter, File, UploadFile, Form
+from fastapi import APIRouter, Depends, File, UploadFile, Form
 
 from app.services.full_pipeline_service import run_full_audience_pipeline
+from app.core.api_key_auth import require_audience_api_key
 
 
-router = APIRouter(tags=["Simple Product Flow"])
+
+router = APIRouter(tags=["Simple Product Flow"], dependencies=[Depends(require_audience_api_key)])
 
 
 @router.post("/audience/generate")
