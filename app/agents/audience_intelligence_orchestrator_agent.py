@@ -165,6 +165,8 @@ class AudienceIntelligenceOrchestratorAgent:
             v2_result=v2_result,
         )
 
+        freshness_guardrail = self._build_freshness_guardrail(v2_result)
+
         v2_guided_selection_report = {
             "enabled": False,
             "reason": "not_attempted",
@@ -369,6 +371,11 @@ class AudienceIntelligenceOrchestratorAgent:
             max_export_cohorts=max_export_cohorts,
         )
 
+        export_result = self._apply_freshness_fail_closed(
+            export_result=export_result,
+            freshness_guardrail=freshness_guardrail,
+        )
+
         print("SAFE EXPORT STATUS:", export_result["status"])
         print("APPROVAL STATUS:", export_result["approval_status"])
         print("DOWNSTREAM ENABLED:", export_result["downstream_export_enabled"])
@@ -394,6 +401,11 @@ class AudienceIntelligenceOrchestratorAgent:
             "prompt": prompt,
             "source_mode": source_mode,
             "source_rows": int(len(safe_raw_input)),
+            "freshness_status": freshness_guardrail.get("freshness_status"),
+            "source_freshness": self._safe_dict(freshness_guardrail),
+            "approval_status": export_result.get("approval_status"),
+            "downstream_export_enabled": bool(export_result.get("downstream_export_enabled", False)),
+            "block_export": bool(export_result.get("block_export", False)),
             "privacy_cohorts": int(len(privacy_cohorts)),
             "prompt_selected_cohorts": int(len(selected_cohorts)),
             "prompt_filter_report": prompt_filter_report,
@@ -444,6 +456,84 @@ class AudienceIntelligenceOrchestratorAgent:
         print("SAFE EXPORT:", export_result["outputs"]["safe_export_manifest"])
 
         return final_summary
+
+    def _build_freshness_guardrail(self, v2_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Converts V2 data freshness into a production export guardrail.
+        Stale source data may still produce a preview, but must not be approvable/exportable.
+        """
+        freshness = {}
+        if isinstance(v2_result, dict):
+            freshness = v2_result.get("data_freshness") or {}
+
+        freshness_status = str(
+            freshness.get("freshness_status")
+            or freshness.get("status")
+            or "unknown"
+        ).strip().lower()
+
+        reason = (
+            freshness.get("reason")
+            or freshness.get("diagnosis")
+            or freshness.get("message")
+            or ""
+        )
+
+        block_export = freshness_status in {"stale", "expired", "outdated"} or "stale" in freshness_status
+
+        return {
+            "freshness_status": freshness_status,
+            "latest_source_timestamp": freshness.get("latest_source_timestamp"),
+            "oldest_source_timestamp": freshness.get("oldest_source_timestamp"),
+            "source_age_hours": freshness.get("source_age_hours"),
+            "freshness_threshold_hours": freshness.get("freshness_threshold_hours"),
+            "source_rows_checked": freshness.get("source_rows_checked"),
+            "block_export": bool(block_export),
+            "approval_status": "blocked_stale_source" if block_export else "pending_approval",
+            "downstream_export_enabled": False,
+            "block_export_reason": reason or (
+                "Source data is stale. Refresh upstream MAID extraction before approval/export."
+                if block_export
+                else ""
+            ),
+        }
+
+    def _apply_freshness_fail_closed(
+        self,
+        *,
+        export_result: Dict[str, Any],
+        freshness_guardrail: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Applies fail-closed export behavior when source freshness is stale.
+        """
+        result = self._safe_dict(export_result)
+
+        if not freshness_guardrail.get("block_export"):
+            result.setdefault("block_export", False)
+            result.setdefault("source_freshness", self._safe_dict(freshness_guardrail))
+            return result
+
+        result["approval_status"] = "blocked_stale_source"
+        result["downstream_export_enabled"] = False
+        result["block_export"] = True
+        result["export_blocked_until_source_refresh"] = True
+        result["block_export_reason"] = freshness_guardrail.get("block_export_reason")
+        result["source_freshness"] = self._safe_dict(freshness_guardrail)
+
+        outputs = result.get("outputs") or {}
+        manifest_path = outputs.get("safe_export_manifest")
+        if manifest_path:
+            try:
+                Path(manifest_path).write_text(
+                    json.dumps(result, indent=2, allow_nan=False),
+                    encoding="utf-8",
+                )
+            except Exception:
+                # Never fail the whole preview because manifest rewrite failed.
+                pass
+
+        return result
 
     def _select_cohorts_from_v2_ranked(
         self,

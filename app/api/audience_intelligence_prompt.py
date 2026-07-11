@@ -194,6 +194,92 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_prompt_api_response(
+    *,
+    result: Dict[str, Any],
+    business_summary: str,
+    business_summary_path: Path,
+) -> Dict[str, Any]:
+    safe_export = result.get("safe_export", {}) or {}
+    v2 = result.get("v2_autonomous", {}) or {}
+    v2_freshness = v2.get("data_freshness", {}) or {}
+    source_freshness = result.get("source_freshness", {}) or {}
+
+    freshness_status = (
+        result.get("freshness_status")
+        or source_freshness.get("freshness_status")
+        or v2_freshness.get("freshness_status")
+        or v2_freshness.get("status")
+    )
+
+    approval_status = (
+        result.get("approval_status")
+        or safe_export.get("approval_status")
+    )
+
+    downstream_export_enabled = bool(
+        result.get(
+            "downstream_export_enabled",
+            safe_export.get("downstream_export_enabled", False),
+        )
+    )
+
+    block_export = bool(
+        result.get("block_export")
+        or safe_export.get("block_export")
+        or approval_status == "blocked_stale_source"
+    )
+
+    block_export_reason = (
+        result.get("block_export_reason")
+        or safe_export.get("block_export_reason")
+        or source_freshness.get("block_export_reason")
+        or source_freshness.get("reason")
+        or v2_freshness.get("reason")
+        or v2_freshness.get("diagnosis")
+    )
+
+    safe_export_response = {
+        "approval_status": approval_status,
+        "downstream_export_enabled": downstream_export_enabled,
+        "block_export": block_export,
+        "block_export_reason": block_export_reason,
+        "export_blocked_until_source_refresh": bool(
+            safe_export.get("export_blocked_until_source_refresh")
+            or approval_status == "blocked_stale_source"
+        ),
+        "exported_cohorts": safe_export.get("exported_cohorts", 0),
+        "exported_lookalike_pairs": safe_export.get("exported_lookalike_pairs", 0),
+        "outputs": safe_export.get("outputs", {}),
+    }
+
+    return {
+        "status": result.get("status"),
+        "run_id": result.get("run_id"),
+        "source_mode": result.get("source_mode"),
+        "source_rows": result.get("source_rows") or v2_freshness.get("source_rows_checked"),
+        "freshness_status": freshness_status,
+        "source_freshness": source_freshness or v2_freshness,
+        "approval_status": approval_status,
+        "downstream_export_enabled": downstream_export_enabled,
+        "block_export": block_export,
+        "block_export_reason": block_export_reason,
+        "privacy_cohorts": result.get("privacy_cohorts"),
+        "business_summary": business_summary,
+        "business_summary_path": str(business_summary_path),
+        "final_summary_path": result.get("final_summary_path"),
+        "run_dir": result.get("run_dir"),
+        "prompt_selected_cohorts": result.get("prompt_selected_cohorts", 0),
+        "prompt_filter_report": result.get("prompt_filter_report", {}),
+        "coverage_warnings": result.get("coverage_warnings", []),
+        "v2_autonomous": v2,
+        "v2_swarm_review": result.get("v2_swarm_review", {}),
+        "safe_export": safe_export_response,
+        "privacy_guarantees": result.get("privacy_guarantees", {}),
+        "run_history": result.get("run_history", {}),
+    }
+
+
 @router.post("/run", dependencies=[Depends(require_audience_api_key)])
 def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
     try:
@@ -224,34 +310,11 @@ def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
         run_history = AudienceRunHistoryService().persist_run(final_summary=result)
         result["run_history"] = run_history
 
-        safe_export = result.get("safe_export", {}) or {}
-
-        return {
-            "status": result.get("status"),
-            "run_id": result.get("run_id"),
-            "source_mode": result.get("source_mode"),
-            "source_rows": result.get("source_rows")
-            or ((result.get("v2_autonomous") or {}).get("data_freshness") or {}).get("source_rows_checked"),
-            "privacy_cohorts": result.get("privacy_cohorts"),
-            "business_summary": business_summary,
-            "business_summary_path": str(business_summary_path),
-            "final_summary_path": result.get("final_summary_path"),
-            "run_dir": result.get("run_dir"),
-            "prompt_selected_cohorts": result.get("prompt_selected_cohorts", 0),
-            "prompt_filter_report": result.get("prompt_filter_report", {}),
-            "coverage_warnings": result.get("coverage_warnings", []),
-            "v2_autonomous": result.get("v2_autonomous", {}),
-            "v2_swarm_review": result.get("v2_swarm_review", {}),
-            "safe_export": {
-                "approval_status": safe_export.get("approval_status"),
-                "downstream_export_enabled": safe_export.get("downstream_export_enabled", False),
-                "exported_cohorts": safe_export.get("exported_cohorts", 0),
-                "exported_lookalike_pairs": safe_export.get("exported_lookalike_pairs", 0),
-                "outputs": safe_export.get("outputs", {}),
-            },
-            "privacy_guarantees": result.get("privacy_guarantees", {}),
-            "run_history": result.get("run_history", {}),
-        }
+        return _build_prompt_api_response(
+            result=result,
+            business_summary=business_summary,
+            business_summary_path=business_summary_path,
+        )
 
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
