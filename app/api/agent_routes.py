@@ -13,6 +13,8 @@ from app.agents.swarm_coordinator import SwarmCoordinator
 from app.agents.workflow_planner_agent import WorkflowPlannerAgent
 
 
+from app.core.production_guardrails import demo_routes_allowed
+
 router = APIRouter(prefix="/agents", tags=["Adaptive Agents"])
 
 
@@ -287,6 +289,9 @@ def generate_five_module_demo_output():
     Runs the local five-module demo output generator and creates separate module ZIPs.
     This is intended for local demo/review only.
     """
+    if not demo_routes_allowed():
+        raise _HTTPException(status_code=404, detail="Demo route disabled in production.")
+
     generator = _PROJECT_ROOT / "scripts" / "generate_five_module_demo_outputs.py"
     splitter = _PROJECT_ROOT / "scripts" / "split_module_outputs.py"
 
@@ -349,6 +354,9 @@ def generate_five_module_demo_output():
 
 @router.get("/latest-five-module-demo-output")
 def latest_five_module_demo_output():
+    if not demo_routes_allowed():
+        raise _HTTPException(status_code=404, detail="Demo route disabled in production.")
+
     package_dir = _latest_five_module_package()
     package_index = _read_package_index(package_dir)
 
@@ -363,6 +371,9 @@ def latest_five_module_demo_output():
 
 @router.get("/download-five-module-demo/{artifact_name}")
 def download_five_module_demo_artifact(artifact_name: str):
+    if not demo_routes_allowed():
+        raise _HTTPException(status_code=404, detail="Demo route disabled in production.")
+
     if artifact_name not in _MODULE_ZIP_NAMES and artifact_name != "MASTER_SUMMARY.json":
         raise _HTTPException(status_code=400, detail="Unsupported artifact name.")
 

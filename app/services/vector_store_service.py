@@ -6,15 +6,22 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
+from app.core.production_guardrails import require_local_file_storage_allowed
+
 
 VECTOR_DIR = Path("data/vectors")
-VECTOR_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_local_vector_storage_allowed(feature_name: str) -> None:
+    require_local_file_storage_allowed(feature_name)
+    VECTOR_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_vector_paths(job_id: str) -> Dict[str, Path]:
     """
     Returns all file paths for one embedding job.
     """
+    _ensure_local_vector_storage_allowed("local vector store paths")
     return {
         "vectors": VECTOR_DIR / f"{job_id}_vectors.npy",
         "metadata": VECTOR_DIR / f"{job_id}_metadata.json",
@@ -105,6 +112,7 @@ def save_cluster_output(job_id: str, clustered_df: pd.DataFrame) -> str:
     """
     Saves clustering output.
     """
+    _ensure_local_vector_storage_allowed("local cluster output")
     output_path = VECTOR_DIR / f"{job_id}_clusters.csv"
     clustered_df.to_csv(output_path, index=False)
     return str(output_path)

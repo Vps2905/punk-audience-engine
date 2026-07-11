@@ -69,6 +69,12 @@ if not any(getattr(route, "path", None) == "/static" for route in app.routes):
 
 @app.get("/ui/audience-agents")
 def audience_agents_ui():
+    from fastapi import HTTPException
+    from app.core.production_guardrails import demo_routes_allowed
+
+    if not demo_routes_allowed():
+        raise HTTPException(status_code=404, detail="Demo UI disabled in production.")
+
     return _FileResponse("app/static/audience_agents.html")
 
 # ---------------------------------------------------------------------
@@ -84,6 +90,12 @@ except RuntimeError:
 
 @app.get("/ui/audience-agents")
 def audience_agents_ui():
+    from fastapi import HTTPException
+    from app.core.production_guardrails import demo_routes_allowed
+
+    if not demo_routes_allowed():
+        raise HTTPException(status_code=404, detail="Demo UI disabled in production.")
+
     return _AudienceFileResponse("app/static/audience_agents.html")
 
 from app.api.audience_intelligence_prompt import router as audience_intelligence_prompt_router

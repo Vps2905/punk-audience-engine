@@ -8,14 +8,15 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from app.services.vector_store_service import save_vector_store, similarity_search
+from app.core.production_guardrails import require_local_file_storage_allowed
 
 
 PROCESSED_DIR = Path("data/processed")
 VECTOR_DIR = Path("data/vectors")
-VECTOR_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def processed_path_for_job(job_id: str) -> Path:
+    require_local_file_storage_allowed("local processed feature CSV input")
     return PROCESSED_DIR / f"{job_id}_clean_features.csv"
 
 
@@ -73,6 +74,9 @@ def tfidf_encode(job_id: str, texts: List[str]) -> Dict[str, Any]:
     This is not as semantic as sentence-transformers,
     but it is reliable and local.
     """
+    require_local_file_storage_allowed("local TF-IDF vectorizer artifact")
+    VECTOR_DIR.mkdir(parents=True, exist_ok=True)
+
     vectorizer = TfidfVectorizer()
     vectors = vectorizer.fit_transform(texts).toarray()
 
