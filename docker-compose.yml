@@ -12,6 +12,7 @@ services:
       REQUIRE_AUDIENCE_API_KEY: "true"
       ALLOW_LOCAL_FILE_STORAGE: "false"
       ALLOW_DEMO_ROUTES: "false"
+      VECTOR_BACKEND: "postgres_array"
     ports:
       - "8000:8000"
     restart: unless-stopped

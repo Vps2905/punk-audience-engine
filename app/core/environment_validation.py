@@ -31,6 +31,7 @@ def validate_environment() -> EnvironmentValidationResult:
         "ECHO_DATABASE_URL",
         "HASH_SECRET",
         "AUDIENCE_HASH_SALT",
+        "VECTOR_BACKEND",
     ]
 
     optional_but_recommended = [
@@ -54,6 +55,12 @@ def validate_environment() -> EnvironmentValidationResult:
     if production and _truthy(os.getenv("ALLOW_DEMO_ROUTES")):
         warnings.append("ALLOW_DEMO_ROUTES is enabled in production.")
 
+    vector_backend = os.getenv("VECTOR_BACKEND", "").strip().lower()
+    allowed_production_vector_backends = {"postgres_array", "postgres", "pg_array", "pgvector"}
+
+    if production and vector_backend and vector_backend not in allowed_production_vector_backends:
+        missing_required.append("VECTOR_BACKEND(postgres_array|pgvector)")
+
     env_presence = {
         "AUDIENCE_API_KEY": bool(os.getenv("AUDIENCE_API_KEY")),
         "ECHO_DATABASE_URL": bool(os.getenv("ECHO_DATABASE_URL")),
@@ -64,6 +71,7 @@ def validate_environment() -> EnvironmentValidationResult:
         "APP_ENV": bool(os.getenv("APP_ENV")),
         "ALLOW_LOCAL_FILE_STORAGE": bool(os.getenv("ALLOW_LOCAL_FILE_STORAGE")),
         "ALLOW_DEMO_ROUTES": bool(os.getenv("ALLOW_DEMO_ROUTES")),
+        "VECTOR_BACKEND": bool(os.getenv("VECTOR_BACKEND")),
     }
 
     return EnvironmentValidationResult(

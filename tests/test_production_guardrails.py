@@ -31,6 +31,7 @@ def test_local_file_storage_blocked_in_production(monkeypatch):
 
 def test_local_vector_store_blocked_in_production(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("VECTOR_BACKEND", "local")
     monkeypatch.delenv("PRODUCTION_MODE", raising=False)
     monkeypatch.delenv("ALLOW_LOCAL_FILE_STORAGE", raising=False)
 

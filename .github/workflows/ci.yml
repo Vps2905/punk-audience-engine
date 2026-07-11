@@ -24,6 +24,7 @@ jobs:
       AUDIENCE_HASH_SALT: test-audience-salt
       ALLOW_LOCAL_FILE_STORAGE: "true"
       ALLOW_DEMO_ROUTES: "true"
+      VECTOR_BACKEND: local
 
     steps:
       - name: Checkout

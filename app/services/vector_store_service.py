@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -7,9 +8,23 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 from app.core.production_guardrails import require_local_file_storage_allowed
+from app.services.postgres_vector_store_service import (
+    load_postgres_vector_store,
+    postgres_similarity_search,
+    save_postgres_cluster_output,
+    save_postgres_vector_store,
+)
 
 
 VECTOR_DIR = Path("data/vectors")
+
+
+def _vector_backend() -> str:
+    return os.getenv("VECTOR_BACKEND", "local").strip().lower()
+
+
+def _use_postgres_vector_backend() -> bool:
+    return _vector_backend() in {"postgres", "postgres_array", "pg_array"}
 
 
 def _ensure_local_vector_storage_allowed(feature_name: str) -> None:
@@ -38,6 +53,14 @@ def save_vector_store(
     """
     Saves vectors and metadata locally.
     """
+    if _use_postgres_vector_backend():
+        return save_postgres_vector_store(
+            job_id=job_id,
+            vectors=vectors,
+            metadata=metadata,
+            model_info=model_info,
+        )
+
     paths = get_vector_paths(job_id)
 
     np.save(paths["vectors"], vectors)
@@ -59,6 +82,9 @@ def load_vector_store(job_id: str) -> Dict[str, Any]:
     """
     Loads vectors and metadata for a job.
     """
+    if _use_postgres_vector_backend():
+        return load_postgres_vector_store(job_id)
+
     paths = get_vector_paths(job_id)
 
     if not paths["vectors"].exists():
@@ -87,6 +113,13 @@ def similarity_search(
     """
     Compares query vector with stored audience vectors using cosine similarity.
     """
+    if _use_postgres_vector_backend():
+        return postgres_similarity_search(
+            job_id=job_id,
+            query_vector=query_vector,
+            top_k=top_k,
+        )
+
     store = load_vector_store(job_id)
     vectors = store["vectors"]
     metadata = store["metadata"]
@@ -112,6 +145,9 @@ def save_cluster_output(job_id: str, clustered_df: pd.DataFrame) -> str:
     """
     Saves clustering output.
     """
+    if _use_postgres_vector_backend():
+        return save_postgres_cluster_output(job_id=job_id, clustered_df=clustered_df)
+
     _ensure_local_vector_storage_allowed("local cluster output")
     output_path = VECTOR_DIR / f"{job_id}_clusters.csv"
     clustered_df.to_csv(output_path, index=False)

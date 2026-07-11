@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from app.services.vector_store_service import save_vector_store, similarity_search
+from app.services.vector_store_service import load_vector_store, save_vector_store, similarity_search
 from app.core.production_guardrails import require_local_file_storage_allowed
 
 
@@ -163,13 +163,8 @@ def encode_query_for_job(job_id: str, query: str) -> np.ndarray:
     """
     Encodes search query using same backend used for the job.
     """
-    model_path = VECTOR_DIR / f"{job_id}_model.json"
-
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model info not found for job_id={job_id}")
-
-    with open(model_path, "r", encoding="utf-8") as f:
-        model_info = json.load(f)
+    store = load_vector_store(job_id)
+    model_info = store["model_info"]
 
     backend = model_info.get("backend")
 
