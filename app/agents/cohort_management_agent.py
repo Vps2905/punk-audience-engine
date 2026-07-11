@@ -82,9 +82,12 @@ class CohortManagementAgent:
         top_n: int = 25,
         lookalike_top_k: int = 3,
         min_export_quality: float = 0.25,
+        persist_artifacts: bool = True,
     ) -> Dict[str, Any]:
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if persist_artifacts:
+            output_dir.mkdir(parents=True, exist_ok=True)
 
         run_id = run_id or f"cohort_management_run_{uuid.uuid4().hex[:12]}"
 
@@ -139,27 +142,60 @@ class CohortManagementAgent:
         self._validate_no_blocked_columns(managed.columns, context="cohort_management_output")
         self._validate_no_blocked_columns(lookalikes.columns, context="cohort_management_lookalikes")
 
-        clusters_path = output_dir / "cohort_clusters.csv"
-        top_cohorts_path = output_dir / "top_cohorts.csv"
-        lookalikes_path = output_dir / "lookalike_cohorts.csv"
-        quality_report_path = output_dir / "cohort_quality_report.json"
-        manifest_path = output_dir / "cohort_management_manifest.json"
-
-        managed.to_csv(clusters_path, index=False)
-        top_cohorts.to_csv(top_cohorts_path, index=False)
-        lookalikes.to_csv(lookalikes_path, index=False)
-
         quality_report = self._build_quality_report(
             managed=managed,
             lookalikes=lookalikes,
             min_export_quality=min_export_quality,
         )
-        self._write_json(quality_report_path, quality_report)
+
+        records = {
+            "top_cohorts": self._json_safe(
+                top_cohorts.to_dict(orient="records")
+            ),
+            "lookalikes": self._json_safe(
+                lookalikes.to_dict(orient="records")
+            ),
+        }
+
+        if persist_artifacts:
+            clusters_path = output_dir / "cohort_clusters.csv"
+            top_cohorts_path = output_dir / "top_cohorts.csv"
+            lookalikes_path = output_dir / "lookalike_cohorts.csv"
+            quality_report_path = output_dir / "cohort_quality_report.json"
+            manifest_path = output_dir / "cohort_management_manifest.json"
+
+            managed.to_csv(clusters_path, index=False)
+            top_cohorts.to_csv(top_cohorts_path, index=False)
+            lookalikes.to_csv(lookalikes_path, index=False)
+            self._write_json(quality_report_path, quality_report)
+
+            outputs = {
+                "cohort_clusters": str(clusters_path),
+                "top_cohorts": str(top_cohorts_path),
+                "lookalike_cohorts": str(lookalikes_path),
+                "cohort_quality_report": str(quality_report_path),
+                "cohort_management_manifest": str(manifest_path),
+            }
+            storage_backend = "local_files"
+        else:
+            base_uri = (
+                "postgres://audience_run_history.final_summary"
+                f"?run_id={run_id}&section=cohort_management"
+            )
+            outputs = {
+                "cohort_clusters": base_uri + "&artifact=clusters",
+                "top_cohorts": base_uri + "&artifact=top_cohorts",
+                "lookalike_cohorts": base_uri + "&artifact=lookalikes",
+                "cohort_quality_report": base_uri + "&artifact=quality_report",
+                "cohort_management_manifest": base_uri + "&artifact=manifest",
+            }
+            storage_backend = "run_history_jsonb"
 
         manifest = {
             "module": "Cohort Management & Lookalike",
             "status": "completed",
             "run_id": run_id,
+            "storage_backend": storage_backend,
             "input_rows": int(len(metadata)),
             "managed_cohorts": int(len(managed)),
             "cluster_count": int(managed["cluster_id"].nunique()),
@@ -173,16 +209,13 @@ class CohortManagementAgent:
             "raw_email_exported": False,
             "raw_phone_exported": False,
             "individual_user_data_exported": False,
-            "outputs": {
-                "cohort_clusters": str(clusters_path),
-                "top_cohorts": str(top_cohorts_path),
-                "lookalike_cohorts": str(lookalikes_path),
-                "cohort_quality_report": str(quality_report_path),
-                "cohort_management_manifest": str(manifest_path),
-            },
+            "records": records,
+            "quality_report": self._json_safe(quality_report),
+            "outputs": outputs,
         }
 
-        self._write_json(manifest_path, manifest)
+        if persist_artifacts:
+            self._write_json(manifest_path, manifest)
 
         self.audit_logger.log(
             "cohort_management_completed",
@@ -191,7 +224,7 @@ class CohortManagementAgent:
                 "managed_cohorts": int(len(managed)),
                 "cluster_count": int(managed["cluster_id"].nunique()),
                 "export_ready_cohorts": int(managed["export_ready"].sum()),
-                "manifest": str(manifest_path),
+                "manifest": manifest["outputs"]["cohort_management_manifest"],
             },
         )
 

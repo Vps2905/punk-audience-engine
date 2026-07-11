@@ -99,9 +99,12 @@ class SafeExportAgent:
         approval_required: bool = True,
         min_management_quality: float = 0.25,
         max_export_cohorts: Optional[int] = None,
+        persist_artifacts: bool = True,
     ) -> Dict[str, Any]:
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if persist_artifacts:
+            output_dir.mkdir(parents=True, exist_ok=True)
 
         run_id = run_id or f"safe_export_run_{uuid.uuid4().hex[:12]}"
 
@@ -153,34 +156,93 @@ class SafeExportAgent:
             approval_required=approval_required,
         )
 
-        cohorts_path = output_dir / "safe_export_cohorts.csv"
-        lookalikes_path = output_dir / "safe_export_lookalikes.csv"
-        payload_path = output_dir / "safe_export_payload.json"
-        approval_path = output_dir / "export_approval_request.json"
-        manifest_path = output_dir / "safe_export_manifest.json"
+        self._validate_no_blocked_columns(
+            export_cohorts.columns,
+            "safe_export_cohorts_output",
+        )
+        self._validate_no_blocked_columns(
+            export_lookalikes.columns,
+            "safe_export_lookalikes_output",
+        )
 
-        self._validate_no_blocked_columns(export_cohorts.columns, "safe_export_cohorts_output")
-        self._validate_no_blocked_columns(export_lookalikes.columns, "safe_export_lookalikes_output")
+        cohort_records = self._json_safe(
+            export_cohorts.to_dict(orient="records")
+        )
+        lookalike_records = self._json_safe(
+            export_lookalikes.to_dict(orient="records")
+        )
+        safe_payload = self._json_safe(export_payload)
+        safe_approval_request = self._json_safe(approval_request)
 
-        export_cohorts.to_csv(cohorts_path, index=False)
-        export_lookalikes.to_csv(lookalikes_path, index=False)
-        self._write_json(payload_path, export_payload)
-        self._write_json(approval_path, approval_request)
-
-        checksums = {
-            "safe_export_cohorts": self._sha256_file(cohorts_path),
-            "safe_export_lookalikes": self._sha256_file(lookalikes_path),
-            "safe_export_payload": self._sha256_file(payload_path),
-            "export_approval_request": self._sha256_file(approval_path),
+        package = {
+            "cohorts": cohort_records,
+            "lookalikes": lookalike_records,
+            "payload": safe_payload,
+            "approval_request": safe_approval_request,
         }
+
+        if persist_artifacts:
+            cohorts_path = output_dir / "safe_export_cohorts.csv"
+            lookalikes_path = output_dir / "safe_export_lookalikes.csv"
+            payload_path = output_dir / "safe_export_payload.json"
+            approval_path = output_dir / "export_approval_request.json"
+            manifest_path = output_dir / "safe_export_manifest.json"
+
+            export_cohorts.to_csv(cohorts_path, index=False)
+            export_lookalikes.to_csv(lookalikes_path, index=False)
+            self._write_json(payload_path, export_payload)
+            self._write_json(approval_path, approval_request)
+
+            checksums = {
+                "safe_export_cohorts": self._sha256_file(cohorts_path),
+                "safe_export_lookalikes": self._sha256_file(lookalikes_path),
+                "safe_export_payload": self._sha256_file(payload_path),
+                "export_approval_request": self._sha256_file(approval_path),
+            }
+
+            outputs = {
+                "safe_export_cohorts": str(cohorts_path),
+                "safe_export_lookalikes": str(lookalikes_path),
+                "safe_export_payload": str(payload_path),
+                "export_approval_request": str(approval_path),
+                "safe_export_manifest": str(manifest_path),
+            }
+            storage_backend = "local_files"
+        else:
+            checksums = {
+                "safe_export_cohorts": self._sha256_json(cohort_records),
+                "safe_export_lookalikes": self._sha256_json(lookalike_records),
+                "safe_export_payload": self._sha256_json(safe_payload),
+                "export_approval_request": self._sha256_json(
+                    safe_approval_request
+                ),
+            }
+
+            base_uri = (
+                "postgres://audience_run_history.safe_export"
+                f"?run_id={run_id}"
+            )
+            outputs = {
+                "safe_export_cohorts": base_uri + "&artifact=cohorts",
+                "safe_export_lookalikes": base_uri + "&artifact=lookalikes",
+                "safe_export_payload": base_uri + "&artifact=payload",
+                "export_approval_request": base_uri + "&artifact=approval_request",
+                "safe_export_manifest": base_uri + "&artifact=manifest",
+            }
+            storage_backend = "run_history_jsonb"
 
         manifest = {
             "module": "Safe Export",
             "status": "completed",
             "run_id": run_id,
+            "storage_backend": storage_backend,
             "approval_required": bool(approval_required),
-            "approval_status": "pending_approval" if approval_required else "not_required",
-            "downstream_export_enabled": False if approval_required else True,
+            "approval_status": (
+                "pending_approval" if approval_required else "not_required"
+            ),
+            "downstream_export_enabled": (
+                False if approval_required else True
+            ),
             "export_blocked_until_approved": bool(approval_required),
             "exported_cohorts": int(len(export_cohorts)),
             "exported_lookalike_pairs": int(len(export_lookalikes)),
@@ -192,17 +254,13 @@ class SafeExportAgent:
             "raw_email_exported": False,
             "raw_phone_exported": False,
             "individual_user_data_exported": False,
-            "outputs": {
-                "safe_export_cohorts": str(cohorts_path),
-                "safe_export_lookalikes": str(lookalikes_path),
-                "safe_export_payload": str(payload_path),
-                "export_approval_request": str(approval_path),
-                "safe_export_manifest": str(manifest_path),
-            },
+            "package": package,
+            "outputs": outputs,
             "checksums_sha256": checksums,
         }
 
-        self._write_json(manifest_path, manifest)
+        if persist_artifacts:
+            self._write_json(manifest_path, manifest)
 
         self.audit_logger.log(
             "safe_export_completed",
@@ -211,7 +269,7 @@ class SafeExportAgent:
                 "exported_cohorts": int(len(export_cohorts)),
                 "exported_lookalike_pairs": int(len(export_lookalikes)),
                 "approval_status": manifest["approval_status"],
-                "manifest": str(manifest_path),
+                "manifest": manifest["outputs"]["safe_export_manifest"],
             },
         )
 
@@ -573,6 +631,15 @@ class SafeExportAgent:
 
     def _bool_series(self, series: pd.Series) -> pd.Series:
         return series.astype(str).str.strip().str.lower().isin(["true", "1", "yes", "y"])
+
+    def _sha256_json(self, value: Any) -> str:
+        payload = json.dumps(
+            self._json_safe(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
     def _sha256_file(self, path: Path) -> str:
         digest = hashlib.sha256()

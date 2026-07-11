@@ -23,6 +23,7 @@ from app.services.autonomous_audience_intelligence_v2_service import (
 )
 from app.services.embedding_service import embed_records
 from app.services.vector_store_service import load_vector_store
+from app.core.production_guardrails import local_file_storage_allowed
 
 
 class AudienceIntelligenceOrchestratorAgent:
@@ -349,16 +350,30 @@ class AudienceIntelligenceOrchestratorAgent:
         print("EXPORT READY:", cohort_result["export_ready_cohorts"])
         print()
 
+        cohort_records = cohort_result.get("records") or {}
+        top_cohorts_for_export = pd.DataFrame(
+            cohort_records.get("top_cohorts") or []
+        )
+        lookalikes_for_export = pd.DataFrame(
+            cohort_records.get("lookalikes") or []
+        )
+
+        if top_cohorts_for_export.empty:
+            raise ValueError(
+                "Cohort management returned no safe top cohorts for export."
+            )
+
         export_agent = SafeExportAgent()
-        export_result = export_agent.run_from_artifacts(
-            top_cohorts_path=cohort_result["outputs"]["top_cohorts"],
-            lookalikes_path=cohort_result["outputs"]["lookalike_cohorts"],
+        export_result = export_agent.run(
+            top_cohorts=top_cohorts_for_export,
+            lookalikes=lookalikes_for_export,
             output_dir=export_dir,
             run_id=f"{run_id}_safe_export",
             audience_namespace="punk_audience",
             approval_required=approval_required,
             min_management_quality=min_export_quality,
             max_export_cohorts=max_export_cohorts,
+            persist_artifacts=local_file_storage_allowed(),
         )
 
         export_result = self._apply_freshness_fail_closed(
@@ -542,6 +557,7 @@ class AudienceIntelligenceOrchestratorAgent:
                 top_n=25,
                 lookalike_top_k=3,
                 min_export_quality=min_export_quality,
+                persist_artifacts=local_file_storage_allowed(),
             )
 
             return embedding_result, cohort_result
@@ -635,7 +651,12 @@ class AudienceIntelligenceOrchestratorAgent:
 
         outputs = result.get("outputs") or {}
         manifest_path = outputs.get("safe_export_manifest")
-        if manifest_path:
+        if (
+            manifest_path
+            and not str(manifest_path).startswith(
+                ("postgres://", "memory://")
+            )
+        ):
             try:
                 Path(manifest_path).write_text(
                     json.dumps(result, indent=2, allow_nan=False),
