@@ -32,6 +32,7 @@ def validate_environment() -> EnvironmentValidationResult:
         "HASH_SECRET",
         "AUDIENCE_HASH_SALT",
         "VECTOR_BACKEND",
+        "EMBEDDING_BACKEND",
     ]
 
     optional_but_recommended = [
@@ -61,6 +62,18 @@ def validate_environment() -> EnvironmentValidationResult:
     if production and vector_backend and vector_backend not in allowed_production_vector_backends:
         missing_required.append("VECTOR_BACKEND(postgres_array|pgvector)")
 
+    embedding_backend = os.getenv("EMBEDDING_BACKEND", "").strip().lower()
+    allowed_production_embedding_backends = {
+        "sklearn_hashing",
+        "hashing",
+        "sentence-transformers",
+        "sentence_transformers",
+        "external_embedding_service",
+    }
+
+    if production and embedding_backend and embedding_backend not in allowed_production_embedding_backends:
+        missing_required.append("EMBEDDING_BACKEND(sklearn_hashing|external_embedding_service)")
+
     env_presence = {
         "AUDIENCE_API_KEY": bool(os.getenv("AUDIENCE_API_KEY")),
         "ECHO_DATABASE_URL": bool(os.getenv("ECHO_DATABASE_URL")),
@@ -72,6 +85,7 @@ def validate_environment() -> EnvironmentValidationResult:
         "ALLOW_LOCAL_FILE_STORAGE": bool(os.getenv("ALLOW_LOCAL_FILE_STORAGE")),
         "ALLOW_DEMO_ROUTES": bool(os.getenv("ALLOW_DEMO_ROUTES")),
         "VECTOR_BACKEND": bool(os.getenv("VECTOR_BACKEND")),
+        "EMBEDDING_BACKEND": bool(os.getenv("EMBEDDING_BACKEND")),
     }
 
     return EnvironmentValidationResult(

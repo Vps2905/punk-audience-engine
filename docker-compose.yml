@@ -13,6 +13,7 @@ services:
       ALLOW_LOCAL_FILE_STORAGE: "false"
       ALLOW_DEMO_ROUTES: "false"
       VECTOR_BACKEND: "postgres_array"
+      EMBEDDING_BACKEND: "sklearn_hashing"
     ports:
       - "8000:8000"
     restart: unless-stopped

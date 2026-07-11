@@ -1,11 +1,12 @@
 import json
+import os
 from pathlib import Path
 from typing import Dict, Any, List
 
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import HashingVectorizer, TfidfVectorizer
 
 from app.services.vector_store_service import load_vector_store, save_vector_store, similarity_search
 from app.core.production_guardrails import require_local_file_storage_allowed
@@ -46,6 +47,33 @@ def dataframe_to_trait_texts(df: pd.DataFrame) -> List[str]:
     Converts all processed feature rows into trait text.
     """
     return [build_trait_text(row) for _, row in df.iterrows()]
+
+
+def _embedding_backend() -> str:
+    return os.getenv("EMBEDDING_BACKEND", "auto").strip().lower()
+
+
+def hashing_encode(texts: List[str], n_features: int | None = None) -> Dict[str, Any]:
+    """
+    Production-safe stateless embedding fallback.
+
+    Uses sklearn HashingVectorizer so query-time encoding can be recreated
+    without writing a local vectorizer artifact.
+    """
+    dimension = int(n_features or os.getenv("EMBEDDING_HASHING_FEATURES", "384"))
+    vectorizer = HashingVectorizer(
+        n_features=dimension,
+        alternate_sign=False,
+        norm="l2",
+    )
+    vectors = vectorizer.transform(texts).toarray()
+
+    return {
+        "vectors": vectors,
+        "backend": "sklearn_hashing",
+        "model_name": "sklearn_hashing_vectorizer",
+        "dimension": dimension,
+    }
 
 
 def try_sentence_transformer_encode(texts: List[str]) -> Dict[str, Any]:
@@ -91,33 +119,45 @@ def tfidf_encode(job_id: str, texts: List[str]) -> Dict[str, Any]:
     }
 
 
-def embed_processed_job(job_id: str) -> Dict[str, Any]:
+def _encode_texts_for_job(job_id: str, texts: List[str]) -> Dict[str, Any]:
+    requested_backend = _embedding_backend()
+
+    if requested_backend in {"sklearn_hashing", "hashing"}:
+        return hashing_encode(texts)
+
+    if requested_backend in {"sentence-transformers", "sentence_transformers"}:
+        return try_sentence_transformer_encode(texts)
+
+    if requested_backend == "tfidf":
+        return tfidf_encode(job_id, texts)
+
+    if requested_backend not in {"", "auto"}:
+        raise ValueError(
+            "Unsupported EMBEDDING_BACKEND. Use auto, sklearn_hashing, "
+            "sentence-transformers, or tfidf."
+        )
+
+    try:
+        return try_sentence_transformer_encode(texts)
+    except Exception as e:
+        vector_backend = os.getenv("VECTOR_BACKEND", "local").strip().lower()
+        if vector_backend in {"postgres", "postgres_array", "pg_array", "pgvector"}:
+            encoded = hashing_encode(texts)
+        else:
+            encoded = tfidf_encode(job_id, texts)
+        encoded["fallback_reason"] = str(e)
+        return encoded
+
+
+def embed_dataframe(job_id: str, df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Main embedding pipeline.
-
-    1. Load processed feature CSV
-    2. Convert each row to trait text
-    3. Generate embeddings
-    4. Save vectors + metadata
+    Embeds a safe feature dataframe and stores vectors through the active vector backend.
     """
-    processed_path = processed_path_for_job(job_id)
-
-    if not processed_path.exists():
-        raise FileNotFoundError(f"Processed file not found: {processed_path}")
-
-    df = pd.read_csv(processed_path)
-
     if df.empty:
         raise ValueError("Processed feature table is empty. No rows to embed.")
 
     texts = dataframe_to_trait_texts(df)
-
-    try:
-        encoded = try_sentence_transformer_encode(texts)
-    except Exception as e:
-        encoded = tfidf_encode(job_id, texts)
-        encoded["fallback_reason"] = str(e)
-
+    encoded = _encode_texts_for_job(job_id, texts)
     vectors = np.array(encoded["vectors"])
 
     metadata = []
@@ -144,7 +184,7 @@ def embed_processed_job(job_id: str) -> Dict[str, Any]:
         job_id=job_id,
         vectors=vectors,
         metadata=metadata,
-        model_info=model_info
+        model_info=model_info,
     )
 
     return {
@@ -159,6 +199,36 @@ def embed_processed_job(job_id: str) -> Dict[str, Any]:
     }
 
 
+def embed_records(job_id: str, records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Production-safe embedding entry point.
+
+    Accepts already-safe cohort/feature records directly instead of requiring
+    a local processed CSV file.
+    """
+    if not records:
+        raise ValueError("records cannot be empty.")
+
+    df = pd.DataFrame(records)
+    return embed_dataframe(job_id=job_id, df=df)
+
+
+def embed_processed_job(job_id: str) -> Dict[str, Any]:
+    """
+    Legacy/dev embedding pipeline.
+
+    Loads local processed feature CSV, then stores vectors through the active
+    vector backend. In production, prefer embed_records to avoid local file input.
+    """
+    processed_path = processed_path_for_job(job_id)
+
+    if not processed_path.exists():
+        raise FileNotFoundError(f"Processed file not found: {processed_path}")
+
+    df = pd.read_csv(processed_path)
+    return embed_dataframe(job_id=job_id, df=df)
+
+
 def encode_query_for_job(job_id: str, query: str) -> np.ndarray:
     """
     Encodes search query using same backend used for the job.
@@ -167,6 +237,14 @@ def encode_query_for_job(job_id: str, query: str) -> np.ndarray:
     model_info = store["model_info"]
 
     backend = model_info.get("backend")
+
+    if backend in {"sklearn_hashing", "hashing"}:
+        dimension = int(
+            model_info.get("dimension")
+            or model_info.get("vector_dimension")
+            or os.getenv("EMBEDDING_HASHING_FEATURES", "384")
+        )
+        return hashing_encode([query], n_features=dimension)["vectors"][0]
 
     if backend == "sentence-transformers":
         from sentence_transformers import SentenceTransformer
