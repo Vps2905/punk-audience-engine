@@ -59,3 +59,36 @@ def test_legacy_synthetic_generate_allows_valid_api_key(monkeypatch):
     assert response.status_code == 200
     assert response.json()["job_id"] == "some_job"
     assert response.json()["num_rows_generated"] == 10
+
+
+def test_legacy_meta_export_requires_api_key(monkeypatch):
+    monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
+    client = TestClient(app)
+
+    response = client.post(
+        "/export/meta/cohort_1",
+    )
+
+    assert response.status_code in {401, 403}
+
+
+def test_legacy_meta_export_requires_api_key(monkeypatch):
+    monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
+    client = TestClient(app)
+
+    response = client.post(
+        "/export/meta/cohort_1",
+    )
+
+    assert response.status_code in {401, 403}
+
+
+def test_legacy_meta_export_requires_api_key(monkeypatch):
+    monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
+    client = TestClient(app)
+
+    response = client.post(
+        "/export/meta/cohort_1",
+    )
+
+    assert response.status_code in {401, 403}

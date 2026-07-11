@@ -18,6 +18,8 @@ from app.agents.synthetic_engine_agent import SyntheticEngineAgent
 from app.agents.privacy_layer_agent import PrivacyLayerAgent
 
 from app.core.api_key_auth import require_audience_api_key
+from app.core.production_guardrails import local_file_storage_allowed
+from app.services.audience_run_history_service import AudienceRunHistoryService
 
 
 router = APIRouter(
@@ -95,9 +97,15 @@ class CohortLookalikeRequest(BaseModel):
 
 
 class MetaExportRequest(BaseModel):
-    safe_export_dir: str
+    run_id: Optional[str] = None
+    safe_export_dir: Optional[str] = None
     approved_only: bool = True
     output_filename: str = "meta_advantage_plus_seed_payload.json"
+    actor: str = Field(
+        default="meta_seed_api",
+        min_length=2,
+        max_length=120,
+    )
 
 
 def _new_run_id(prefix: str) -> str:
@@ -407,93 +415,446 @@ def cohort_lookalike(request: CohortLookalikeRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.post("/export/meta/{cohort_id}")
-def export_meta_seed_payload(cohort_id: str, request: MetaExportRequest) -> Dict[str, Any]:
-    """
-    Safe Meta Advantage+ seed payload generator.
+def _build_meta_seed_payload(
+    *,
+    cohort_id: str,
+    row: Dict[str, Any],
+    approval_status: str,
+    downstream_export_enabled: bool,
+    run_id: Optional[str] = None,
+    synthetic_preview: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    preview = synthetic_preview or []
 
-    This does NOT upload to Meta. It creates a gated payload only after approval.
-    Real Meta upload should be a separate explicit connector with credentials.
-    """
-    try:
-        safe_export_dir = Path(request.safe_export_dir)
+    return {
+        "package_type": "meta_advantage_plus_safe_seed_payload",
+        "run_id": run_id,
+        "cohort_id": cohort_id,
+        "meta_upload_performed": False,
+        "requires_explicit_meta_connector": True,
+        "approval_status": approval_status,
+        "downstream_export_enabled": bool(
+            downstream_export_enabled
+        ),
+        "audience": {
+            "name": row.get("audience_name"),
+            "location_name": row.get("location_name"),
+            "primary_poi_type": row.get(
+                "primary_poi_type"
+            ),
+            "created_day_part": row.get(
+                "created_day_part"
+            ),
+            "lookback_bucket": row.get(
+                "lookback_bucket"
+            ),
+            "management_quality_score": row.get(
+                "management_quality_score"
+            ),
+            "privacy_mode": row.get("privacy_mode"),
+            "data_safety_status": row.get(
+                "data_safety_status"
+            ),
+        },
+        "safe_seed_strategy": {
+            "use_aggregated_traits": True,
+            "use_synthetic_seed_profiles": bool(preview),
+            "raw_maids_included": False,
+            "hashed_identifiers_included": False,
+            "raw_lat_lng_included": False,
+            "individual_user_rows_included": False,
+        },
+        "synthetic_seed_preview": preview,
+    }
 
-        manifest_path = safe_export_dir / "safe_export_manifest.json"
-        cohorts_path = safe_export_dir / "safe_export_cohorts.csv"
-        synthetic_path = safe_export_dir.parent / "02_synthetic" / "synthetic_safe_seed_profiles.csv"
 
-        if not manifest_path.exists():
-            raise HTTPException(status_code=404, detail=f"safe_export_manifest.json not found in {safe_export_dir}")
-        if not cohorts_path.exists():
-            raise HTTPException(status_code=404, detail=f"safe_export_cohorts.csv not found in {safe_export_dir}")
+def _record_meta_audit(
+    *,
+    service: AudienceRunHistoryService,
+    run_id: str,
+    event_type: str,
+    actor: str,
+    details: Dict[str, Any],
+) -> Dict[str, Any]:
+    result = service.record_event(
+        run_id=run_id,
+        event_type=event_type,
+        actor=actor,
+        details=details,
+    )
 
-        manifest = json.loads(manifest_path.read_text())
-        cohorts = pd.read_csv(cohorts_path)
+    if result.get("status") != "recorded":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Meta export audit could not be recorded.",
+                "audit": result,
+            },
+        )
 
-        if request.approved_only and manifest.get("approval_status") != "approved":
+    return result
+
+
+def _export_meta_from_run_history(
+    *,
+    cohort_id: str,
+    request: MetaExportRequest,
+) -> Dict[str, Any]:
+    run_id = str(request.run_id or "").strip()
+
+    if not run_id:
+        raise HTTPException(
+            status_code=400,
+            detail="run_id is required for DB-backed Meta export.",
+        )
+
+    service = AudienceRunHistoryService()
+    history = service.get_run(run_id)
+
+    status = history.get("status")
+
+    if status == "skipped":
+        raise HTTPException(status_code=503, detail=history)
+
+    if status == "not_found":
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run not found: {run_id}",
+        )
+
+    if status != "ok":
+        raise HTTPException(status_code=500, detail=history)
+
+    run = history.get("run") or {}
+    final_summary = run.get("final_summary") or {}
+
+    if isinstance(final_summary, str):
+        try:
+            final_summary = json.loads(final_summary)
+        except json.JSONDecodeError as exc:
             raise HTTPException(
-                status_code=403,
-                detail="Export is blocked until approval_status is approved.",
+                status_code=500,
+                detail="Stored final_summary is invalid JSON.",
+            ) from exc
+
+    safe_export = (
+        final_summary.get("safe_export")
+        or run.get("safe_export")
+        or {}
+    )
+
+    run_approval = str(
+        run.get("approval_status") or ""
+    ).strip().lower()
+
+    export_approval = str(
+        safe_export.get("approval_status") or ""
+    ).strip().lower()
+
+    run_downstream = bool(
+        run.get("downstream_export_enabled", False)
+    )
+    export_downstream = bool(
+        safe_export.get(
+            "downstream_export_enabled",
+            False,
+        )
+    )
+
+    approval_valid = (
+        run_approval == "approved"
+        and export_approval == "approved"
+    )
+    downstream_valid = (
+        run_downstream and export_downstream
+    )
+
+    if not approval_valid or not downstream_valid:
+        audit = _record_meta_audit(
+            service=service,
+            run_id=run_id,
+            event_type="meta_seed_payload_blocked",
+            actor=request.actor,
+            details={
+                "cohort_id": cohort_id,
+                "run_approval_status": run_approval,
+                "safe_export_approval_status": (
+                    export_approval
+                ),
+                "run_downstream_export_enabled": (
+                    run_downstream
+                ),
+                "safe_export_downstream_enabled": (
+                    export_downstream
+                ),
+                "meta_upload_performed": False,
+                "reason": (
+                    "approved run and enabled downstream "
+                    "export are both required"
+                ),
+            },
+        )
+
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": (
+                    "Meta seed generation is blocked until "
+                    "the run is approved and downstream export "
+                    "is enabled."
+                ),
+                "run_id": run_id,
+                "cohort_id": cohort_id,
+                "run_approval_status": run_approval,
+                "safe_export_approval_status": (
+                    export_approval
+                ),
+                "downstream_export_enabled": False,
+                "meta_upload_performed": False,
+                "audit_status": audit.get("status"),
+            },
+        )
+
+    package = safe_export.get("package") or {}
+    cohorts = package.get("cohorts") or []
+
+    if not isinstance(cohorts, list) or not cohorts:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Run does not contain a DB-backed safe-export "
+                "cohort package."
+            ),
+        )
+
+    row = next(
+        (
+            item
+            for item in cohorts
+            if isinstance(item, dict)
+            and str(item.get("export_cohort_id"))
+            == str(cohort_id)
+        ),
+        None,
+    )
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"cohort_id not found in run package: {cohort_id}",
+        )
+
+    payload = _build_meta_seed_payload(
+        cohort_id=cohort_id,
+        row=row,
+        approval_status=export_approval,
+        downstream_export_enabled=True,
+        run_id=run_id,
+        synthetic_preview=[],
+    )
+
+    audit = _record_meta_audit(
+        service=service,
+        run_id=run_id,
+        event_type="meta_seed_payload_generated",
+        actor=request.actor,
+        details={
+            "cohort_id": cohort_id,
+            "approval_status": export_approval,
+            "downstream_export_enabled": True,
+            "storage_backend": "run_history_jsonb",
+            "meta_upload_performed": False,
+        },
+    )
+
+    return {
+        "status": "completed",
+        "message": (
+            "Safe Meta seed payload generated in memory. "
+            "No Meta upload was performed."
+        ),
+        "storage_backend": "memory_with_postgres_audit",
+        "output_path": (
+            f"memory://meta_seed_payload/{run_id}/{cohort_id}"
+        ),
+        "run_id": run_id,
+        "cohort_id": cohort_id,
+        "meta_upload_performed": False,
+        "audit_event": audit,
+        "payload": payload,
+    }
+
+
+def _export_meta_from_local_artifacts(
+    *,
+    cohort_id: str,
+    request: MetaExportRequest,
+) -> Dict[str, Any]:
+    if not local_file_storage_allowed():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "safe_export_dir is disabled in production. "
+                "Provide run_id for DB-backed export."
+            ),
+        )
+
+    if not request.safe_export_dir:
+        raise HTTPException(
+            status_code=400,
+            detail="safe_export_dir is required for local compatibility.",
+        )
+
+    safe_export_dir = Path(request.safe_export_dir)
+
+    manifest_path = (
+        safe_export_dir / "safe_export_manifest.json"
+    )
+    cohorts_path = (
+        safe_export_dir / "safe_export_cohorts.csv"
+    )
+    synthetic_path = (
+        safe_export_dir.parent
+        / "02_synthetic"
+        / "synthetic_safe_seed_profiles.csv"
+    )
+
+    if not manifest_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "safe_export_manifest.json not found in "
+                f"{safe_export_dir}"
+            ),
+        )
+
+    if not cohorts_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "safe_export_cohorts.csv not found in "
+                f"{safe_export_dir}"
+            ),
+        )
+
+    manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    cohorts = pd.read_csv(cohorts_path)
+
+    if (
+        request.approved_only
+        and manifest.get("approval_status") != "approved"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Export is blocked until approval_status "
+                "is approved."
+            ),
+        )
+
+    if "export_cohort_id" not in cohorts.columns:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "safe_export_cohorts.csv missing "
+                "export_cohort_id"
+            ),
+        )
+
+    selected = cohorts[
+        cohorts["export_cohort_id"].astype(str)
+        == str(cohort_id)
+    ]
+
+    if selected.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"cohort_id not found: {cohort_id}",
+        )
+
+    row = selected.iloc[0].to_dict()
+
+    synthetic_preview: List[Dict[str, Any]] = []
+
+    if synthetic_path.exists():
+        synthetic = pd.read_csv(synthetic_path)
+        synthetic_preview = _safe_preview(
+            synthetic,
+            limit=25,
+        )
+
+        for item in synthetic_preview:
+            item["approval_status"] = manifest.get(
+                "approval_status",
+                "pending_approval",
             )
 
-        if "export_cohort_id" not in cohorts.columns:
-            raise HTTPException(status_code=400, detail="safe_export_cohorts.csv missing export_cohort_id")
+    payload = _build_meta_seed_payload(
+        cohort_id=cohort_id,
+        row=row,
+        approval_status=manifest.get(
+            "approval_status",
+            "pending_approval",
+        ),
+        downstream_export_enabled=bool(
+            manifest.get(
+                "downstream_export_enabled",
+                False,
+            )
+        ),
+        synthetic_preview=synthetic_preview,
+    )
 
-        selected = cohorts[cohorts["export_cohort_id"].astype(str) == cohort_id]
+    output_path = (
+        safe_export_dir / request.output_filename
+    )
+    output_path.write_text(
+        json.dumps(payload, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
 
-        if selected.empty:
-            raise HTTPException(status_code=404, detail=f"cohort_id not found: {cohort_id}")
+    return {
+        "status": "completed",
+        "message": (
+            "Local compatibility Meta seed payload generated. "
+            "No Meta upload was performed."
+        ),
+        "storage_backend": "local_files",
+        "output_path": str(output_path),
+        "payload": payload,
+    }
 
-        row = selected.iloc[0].to_dict()
 
-        synthetic_preview: List[Dict[str, Any]] = []
-        if synthetic_path.exists():
-            synthetic = pd.read_csv(synthetic_path)
-            synthetic_preview = _safe_preview(synthetic, limit=25)
+@router.post("/export/meta/{cohort_id}")
+def export_meta_seed_payload(
+    cohort_id: str,
+    request: MetaExportRequest,
+) -> Dict[str, Any]:
+    """
+    Build a gated Meta Advantage+ seed payload.
 
-            # Keep preview approval state aligned with the approved export package.
-            for item in synthetic_preview:
-                item["approval_status"] = manifest.get("approval_status", "pending_approval")
+    Production uses run-history JSONB and requires a fully approved run.
+    Local artifact compatibility is available only when explicitly allowed.
+    """
+    try:
+        if request.run_id:
+            return _export_meta_from_run_history(
+                cohort_id=cohort_id,
+                request=request,
+            )
 
-        payload = {
-            "package_type": "meta_advantage_plus_safe_seed_payload",
-            "cohort_id": cohort_id,
-            "meta_upload_performed": False,
-            "requires_explicit_meta_connector": True,
-            "approval_status": manifest.get("approval_status"),
-            "downstream_export_enabled": manifest.get("downstream_export_enabled"),
-            "audience": {
-                "name": row.get("audience_name"),
-                "location_name": row.get("location_name"),
-                "primary_poi_type": row.get("primary_poi_type"),
-                "created_day_part": row.get("created_day_part"),
-                "lookback_bucket": row.get("lookback_bucket"),
-                "management_quality_score": row.get("management_quality_score"),
-                "privacy_mode": row.get("privacy_mode"),
-                "data_safety_status": row.get("data_safety_status"),
-            },
-            "safe_seed_strategy": {
-                "use_aggregated_traits": True,
-                "use_synthetic_seed_profiles": bool(synthetic_preview),
-                "raw_maids_included": False,
-                "hashed_identifiers_included": False,
-                "raw_lat_lng_included": False,
-                "individual_user_rows_included": False,
-            },
-            "synthetic_seed_preview": synthetic_preview,
-        }
-
-        output_path = safe_export_dir / request.output_filename
-        output_path.write_text(json.dumps(payload, indent=2, allow_nan=False))
-
-        return {
-            "status": "completed",
-            "message": "Safe Meta seed payload generated. No Meta upload was performed.",
-            "output_path": str(output_path),
-            "payload": payload,
-        }
+        return _export_meta_from_local_artifacts(
+            cohort_id=cohort_id,
+            request=request,
+        )
 
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+

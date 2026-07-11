@@ -7,12 +7,14 @@ from uuid import uuid4
 import pandas as pd
 
 from app.services.cohort_service import get_cohort
+from app.core.production_guardrails import (
+    require_local_file_storage_allowed,
+)
 
 
 EXPORT_DIR = Path("data/exports")
 SYNTHETIC_DIR = Path("data/synthetic")
 
-EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 UNSAFE_KEYWORDS = [
@@ -84,6 +86,11 @@ def generate_meta_safe_export(
     - synthetic seed CSV
     - export manifest JSON
     """
+    require_local_file_storage_allowed(
+        "legacy Meta safe export"
+    )
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
     cohort = get_cohort(cohort_id)
 
     if cohort.get("status") == "not_found":
@@ -185,6 +192,10 @@ def get_export_status(export_id: str) -> Dict[str, Any]:
     """
     Returns export status.
     """
+    require_local_file_storage_allowed(
+        "legacy Meta export status"
+    )
+
     if export_id in EXPORT_STATUS:
         return EXPORT_STATUS[export_id]
 
