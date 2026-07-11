@@ -7,7 +7,11 @@ from app.services.autonomous_audience_intelligence_v2_service import (
 )
 
 
-def test_autonomous_audience_intelligence_v2_service_runs_full_pipeline(tmp_path):
+def test_autonomous_audience_intelligence_v2_service_runs_full_pipeline(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALL_SAFE_COHORT_EMBEDDING_STORE", "local")
+    monkeypatch.setenv("VECTOR_BACKEND", "local")
+    monkeypatch.setenv("EMBEDDING_BACKEND", "sklearn_hashing")
+
     df = pd.DataFrame(
         {
             "created_at": [

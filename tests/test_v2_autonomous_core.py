@@ -52,7 +52,7 @@ def test_v2_embedding_uses_all_safe_cohorts_and_384_dimensions(tmp_path):
         }
     )
 
-    manifest = AllSafeCohortEmbeddingService(max_features=384).build_index(df, tmp_path)
+    manifest = AllSafeCohortEmbeddingService(max_features=384, embedding_store="local").build_index(df, tmp_path)
 
     assert manifest["vector_count"] == 3
     assert manifest["vector_dimension"] == 384

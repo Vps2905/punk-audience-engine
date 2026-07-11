@@ -55,6 +55,7 @@ class AutonomousAudienceIntelligenceV2Service:
         embedding_manifest = AllSafeCohortEmbeddingService().build_index(
             safe_cohorts=safe_cohorts,
             output_dir=output_path / "embeddings",
+            job_id=f"v2_all_safe_{output_path.parent.name}_{output_path.name}",
         )
 
         ranked = DynamicAudienceRankingService().rank(
