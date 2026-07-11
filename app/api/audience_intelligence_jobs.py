@@ -316,6 +316,27 @@ def _run_job_background(job_id: str) -> None:
 
         result["business_summary"] = business_summary
 
+        # Async jobs must persist their completed run before they can be
+        # approved through the DB-backed run-history workflow.
+        run_history = AudienceRunHistoryService().persist_run(
+            final_summary=result,
+        )
+        result["run_history"] = run_history
+
+        uses_postgres_job_store = (
+            getattr(job_store, "backend", "local")
+            in AudienceJobStore.POSTGRES_BACKENDS
+        )
+
+        if (
+            uses_postgres_job_store
+            and run_history.get("status") != "persisted"
+        ):
+            raise RuntimeError(
+                "Audience run-history persistence failed for async job "
+                f"{job_id}: {run_history}"
+            )
+
         job_store.update_status(
             job_id,
             status="completed",
@@ -510,6 +531,32 @@ def _safe_result_for_job(result: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "status": result.get("status"),
         "run_id": result.get("run_id"),
+        "freshness_status": result.get("freshness_status"),
+        "source_freshness": result.get("source_freshness"),
+        "approval_status": (
+            result.get("approval_status")
+            or (result.get("safe_export") or {}).get(
+                "approval_status"
+            )
+        ),
+        "downstream_export_enabled": bool(
+            result.get(
+                "downstream_export_enabled",
+                (result.get("safe_export") or {}).get(
+                    "downstream_export_enabled",
+                    False,
+                ),
+            )
+        ),
+        "block_export": bool(
+            result.get(
+                "block_export",
+                (result.get("safe_export") or {}).get(
+                    "block_export",
+                    False,
+                ),
+            )
+        ),
         "prompt": result.get("prompt"),
         "source_mode": result.get("source_mode"),
         "source_rows": result.get("source_rows"),
@@ -524,6 +571,7 @@ def _safe_result_for_job(result: Dict[str, Any]) -> Dict[str, Any]:
         "run_dir": result.get("run_dir"),
         "safe_export": result.get("safe_export"),
         "privacy_guarantees": result.get("privacy_guarantees"),
+        "run_history": result.get("run_history"),
     }
 
 
