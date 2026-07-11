@@ -33,6 +33,7 @@ def validate_environment() -> EnvironmentValidationResult:
         "AUDIENCE_HASH_SALT",
         "VECTOR_BACKEND",
         "EMBEDDING_BACKEND",
+        "ALL_SAFE_COHORT_EMBEDDING_STORE",
     ]
 
     optional_but_recommended = [
@@ -74,6 +75,12 @@ def validate_environment() -> EnvironmentValidationResult:
     if production and embedding_backend and embedding_backend not in allowed_production_embedding_backends:
         missing_required.append("EMBEDDING_BACKEND(sklearn_hashing|external_embedding_service)")
 
+    all_safe_embedding_store = os.getenv("ALL_SAFE_COHORT_EMBEDDING_STORE", "").strip().lower()
+    allowed_all_safe_embedding_stores = {"postgres", "postgres_array", "pg_array", "pgvector"}
+
+    if production and all_safe_embedding_store and all_safe_embedding_store not in allowed_all_safe_embedding_stores:
+        missing_required.append("ALL_SAFE_COHORT_EMBEDDING_STORE(postgres)")
+
     env_presence = {
         "AUDIENCE_API_KEY": bool(os.getenv("AUDIENCE_API_KEY")),
         "ECHO_DATABASE_URL": bool(os.getenv("ECHO_DATABASE_URL")),
@@ -86,6 +93,7 @@ def validate_environment() -> EnvironmentValidationResult:
         "ALLOW_DEMO_ROUTES": bool(os.getenv("ALLOW_DEMO_ROUTES")),
         "VECTOR_BACKEND": bool(os.getenv("VECTOR_BACKEND")),
         "EMBEDDING_BACKEND": bool(os.getenv("EMBEDDING_BACKEND")),
+        "ALL_SAFE_COHORT_EMBEDDING_STORE": bool(os.getenv("ALL_SAFE_COHORT_EMBEDDING_STORE")),
     }
 
     return EnvironmentValidationResult(
