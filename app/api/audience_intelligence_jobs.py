@@ -13,6 +13,8 @@ from app.agents.audience_intelligence_orchestrator_agent import AudienceIntellig
 from app.core.audience_job_store import AudienceJobStore
 
 from app.core.api_key_auth import require_audience_api_key
+from app.core.production_guardrails import local_file_storage_allowed
+from app.services.audience_run_history_service import AudienceRunHistoryService
 
 
 router = APIRouter(
@@ -293,10 +295,25 @@ def _run_job_background(job_id: str) -> None:
         )
 
         business_summary = _build_business_summary(result)
-        business_summary_path = Path(result["run_dir"]) / "business_prompt_summary.md"
-        business_summary_path.write_text(business_summary)
 
-        result["business_summary_path"] = str(business_summary_path)
+        if local_file_storage_allowed():
+            business_summary_path = (
+                Path(result["run_dir"])
+                / "business_prompt_summary.md"
+            )
+            business_summary_path.write_text(
+                business_summary,
+                encoding="utf-8",
+            )
+            result["business_summary_path"] = str(
+                business_summary_path
+            )
+        else:
+            result["business_summary_path"] = (
+                "postgres://audience_jobs.result"
+                f"?job_id={job_id}&field=business_summary"
+            )
+
         result["business_summary"] = business_summary
 
         job_store.update_status(
@@ -377,143 +394,116 @@ def get_result(job_id: str) -> Dict[str, Any]:
 
 
 @router.post("/approve/{job_id}")
-def approve_job_export(job_id: str, request: ApprovalRequest) -> Dict[str, Any]:
+def approve_job_export(
+    job_id: str,
+    request: ApprovalRequest,
+) -> Dict[str, Any]:
     try:
         record = job_store.get(job_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     if record["status"] != "completed":
-        raise HTTPException(status_code=400, detail="Only completed jobs can be approved.")
+        raise HTTPException(
+            status_code=400,
+            detail="Only completed jobs can be approved.",
+        )
 
     result = record.get("result") or {}
-    run_dir = result.get("run_dir")
+    run_id = result.get("run_id")
 
-    if not run_dir:
-        raise HTTPException(status_code=400, detail="Completed job does not have run_dir.")
+    if not run_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Completed job does not contain a run_id.",
+        )
 
-    run_dir_path = Path(run_dir)
-    safe_export_dir = run_dir_path / "05_safe_export"
-
-    manifest_path = safe_export_dir / "safe_export_manifest.json"
-    payload_path = safe_export_dir / "safe_export_payload.json"
-    approval_path = safe_export_dir / "export_approval_request.json"
-    cohorts_path = safe_export_dir / "safe_export_cohorts.csv"
-    approval_decision_path = safe_export_dir / "approval_decision.json"
-
-    for path in [manifest_path, payload_path, approval_path, cohorts_path]:
-        if not path.exists():
-            raise HTTPException(status_code=400, detail=f"Missing export artifact: {path}")
-
-    manifest = json.loads(manifest_path.read_text())
-    payload = json.loads(payload_path.read_text())
-    approval = json.loads(approval_path.read_text())
-    cohorts = pd.read_csv(cohorts_path)
-
-    approval_blockers = _collect_job_approval_blockers(
-        result=result,
-        manifest=manifest,
-        payload=payload,
-        approval=approval,
-        cohorts=cohorts,
+    service = AudienceRunHistoryService()
+    decision = service.approve_run(
+        run_id=run_id,
+        actor=request.approver,
+        note=request.note,
+        downstream_export_enabled=True,
     )
 
-    if approval_blockers:
-        blocked_at = datetime.now(timezone.utc).isoformat()
-        approval_decision = {
-            "job_id": job_id,
-            "run_dir": str(run_dir_path),
-            "approval_status": "blocked_approval",
-            "approved_at": None,
-            "approved_by": request.approver,
-            "note": request.note,
-            "downstream_export_enabled": False,
-            "meta_upload_performed": False,
-            "approval_blockers": approval_blockers,
-            "blocked_at": blocked_at,
-            "message": "Export approval blocked by safety checks.",
-        }
+    decision_status = decision.get("status")
 
-        approval_decision_path.write_text(json.dumps(approval_decision, indent=2, allow_nan=False))
+    if decision_status == "skipped":
+        raise HTTPException(status_code=503, detail=decision)
 
-        manifest["approval_status"] = "blocked_approval"
-        manifest["downstream_export_enabled"] = False
-        manifest["export_blocked_until_approved"] = True
-        manifest["approval_blockers"] = approval_blockers
-        manifest["blocked_at"] = blocked_at
+    if decision_status == "not_found":
+        raise HTTPException(status_code=404, detail=decision)
 
-        payload["approval_status"] = "blocked_approval"
-        payload["downstream_export_enabled"] = False
-        payload["approval_blockers"] = approval_blockers
+    if decision_status == "failed":
+        raise HTTPException(status_code=500, detail=decision)
 
-        approval["approval_status"] = "blocked_approval"
-        approval["export_blocked_until_approved"] = True
-        approval["review_required_before_downstream_delivery"] = True
-        approval["approval_blockers"] = approval_blockers
-        approval["blocked_at"] = blocked_at
+    refreshed = service.get_run(run_id)
 
-        manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False))
-        payload_path.write_text(json.dumps(payload, indent=2, allow_nan=False))
-        approval_path.write_text(json.dumps(approval, indent=2, allow_nan=False))
+    if refreshed.get("status") == "ok":
+        run = refreshed.get("run") or {}
+        final_summary = run.get("final_summary") or {}
 
-        if isinstance(result.get("safe_export"), dict):
-            result["safe_export"]["approval_status"] = "blocked_approval"
-            result["safe_export"]["downstream_export_enabled"] = False
-            result["safe_export"]["approval_blockers"] = approval_blockers
+        if isinstance(final_summary, str):
+            try:
+                final_summary = json.loads(final_summary)
+            except json.JSONDecodeError:
+                final_summary = {}
 
-        result["approval_decision_path"] = str(approval_decision_path)
-        record["result"] = result
-        job_store.save(record)
+        refreshed_export = (
+            final_summary.get("safe_export")
+            or run.get("safe_export")
+            or {}
+        )
 
-        raise HTTPException(status_code=400, detail=approval_decision)
+        if refreshed_export:
+            result["safe_export"] = refreshed_export
 
-    manifest["approval_status"] = "approved"
-    manifest["downstream_export_enabled"] = True
-    manifest["export_blocked_until_approved"] = False
-    manifest["approved_at"] = datetime.now(timezone.utc).isoformat()
-    manifest["approved_by"] = request.approver
+        result["approval_status"] = run.get(
+            "approval_status",
+            decision.get("approval_status"),
+        )
+        result["downstream_export_enabled"] = bool(
+            run.get(
+                "downstream_export_enabled",
+                decision.get(
+                    "downstream_export_enabled",
+                    False,
+                ),
+            )
+        )
 
-    payload["approval_status"] = "approved"
-    payload["downstream_export_enabled"] = True
+    if decision_status == "blocked":
+        blocked_status = (
+            decision.get("approval_status")
+            or "blocked_approval"
+        )
 
-    approval["approval_status"] = "approved"
-    approval["export_blocked_until_approved"] = False
-    approval["review_required_before_downstream_delivery"] = False
-    approval["approved_at"] = manifest["approved_at"]
-    approval["approved_by"] = request.approver
-    approval["approval_note"] = request.note
+        safe_export = result.get("safe_export") or {}
+        safe_export["approval_status"] = blocked_status
+        safe_export["downstream_export_enabled"] = False
+        safe_export["approval_blockers"] = (
+            decision.get("blockers")
+            or decision.get("approval_blockers")
+            or []
+        )
 
-    if "export_status" in cohorts.columns:
-        cohorts["export_status"] = "approved"
+        result["safe_export"] = safe_export
+        result["approval_status"] = blocked_status
+        result["downstream_export_enabled"] = False
 
-    manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False))
-    payload_path.write_text(json.dumps(payload, indent=2, allow_nan=False))
-    approval_path.write_text(json.dumps(approval, indent=2, allow_nan=False))
-    cohorts.to_csv(cohorts_path, index=False)
-
-    approval_decision = {
-        "job_id": job_id,
-        "run_dir": str(run_dir_path),
-        "approval_status": "approved",
-        "approved_at": manifest["approved_at"],
-        "approved_by": request.approver,
-        "note": request.note,
-        "downstream_export_enabled": True,
-        "meta_upload_performed": False,
-        "message": "Safe export package approved. Meta upload is still a separate explicit step.",
-    }
-
-    approval_decision_path.write_text(json.dumps(approval_decision, indent=2, allow_nan=False))
-
-    result["safe_export"]["approval_status"] = "approved"
-    result["safe_export"]["downstream_export_enabled"] = True
-    result["safe_export"]["export_blocked_until_approved"] = False
-    result["approval_decision_path"] = str(approval_decision_path)
-
+    result["approval_decision"] = decision
     record["result"] = result
     job_store.save(record)
 
-    return approval_decision
+    response = {
+        "job_id": job_id,
+        **decision,
+    }
+
+    if decision_status == "blocked":
+        raise HTTPException(status_code=400, detail=response)
+
+    return response
 
 
 def _safe_result_for_job(result: Dict[str, Any]) -> Dict[str, Any]:

@@ -15,6 +15,7 @@ services:
       VECTOR_BACKEND: "postgres_array"
       EMBEDDING_BACKEND: "sklearn_hashing"
       ALL_SAFE_COHORT_EMBEDDING_STORE: "postgres"
+      AUDIENCE_JOB_STORE_BACKEND: "postgres"
     ports:
       - "8000:8000"
     restart: unless-stopped
