@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
+from app.utils.dp_noise import add_gaussian_noise
 
 from app.services.contribution_bounding_service import (
     ContributionBoundingConfig,
@@ -385,20 +386,26 @@ class PrivacyIngestionPipelineService:
         if config.mechanism.lower() != "gaussian":
             raise ValueError("Only gaussian mechanism is currently supported.")
 
-        sigma = config.sensitivity * math.sqrt(2 * math.log(1.25 / config.delta)) / config.epsilon
-
         output: List[Dict[str, Any]] = []
 
         for row in rows:
             bounded_count = float(row["bounded_count"])
-            noisy_count = max(0, int(round(bounded_count + rng.gauss(0, sigma))))
+
+            dp_result = add_gaussian_noise(
+                int(round(bounded_count)),
+                epsilon=config.epsilon,
+                delta=config.delta,
+                sensitivity=config.sensitivity,
+                rng=rng,
+            )
 
             safe_row = dict(row)
-            safe_row["dp_noisy_count"] = noisy_count
+            safe_row["dp_noisy_count"] = dp_result["private_count"]
             safe_row["dp_epsilon"] = config.epsilon
             safe_row["dp_delta"] = config.delta
             safe_row["dp_mechanism"] = config.mechanism
-            safe_row["dp_sigma"] = sigma
+            safe_row["dp_sigma"] = dp_result["sigma"]
+            safe_row["dp_probability_ratio_bound"] = dp_result["dp_probability_ratio_bound"]
 
             output.append(safe_row)
 
