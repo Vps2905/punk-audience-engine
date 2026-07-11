@@ -29,11 +29,11 @@ def validate_environment() -> EnvironmentValidationResult:
     required_in_production = [
         "AUDIENCE_API_KEY",
         "ECHO_DATABASE_URL",
+        "HASH_SECRET",
+        "AUDIENCE_HASH_SALT",
     ]
 
     optional_but_recommended = [
-        "HASH_SECRET",
-        "AUDIENCE_HASH_SALT",
         "OPENROUTER_API_KEY",
     ]
 

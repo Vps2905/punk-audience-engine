@@ -4,6 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV APP_HOME=/app
 ENV PYTHONPATH=/app
+ENV PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
@@ -15,8 +16,12 @@ RUN apt-get update \
 
 COPY requirements.txt /app/requirements.txt
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+# Production container must be CPU-only.
+# Avoid pulling huge CUDA/NVIDIA wheels through torch dependencies.
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1+cpu \
+    && grep -v -E '^(torch|torchvision|torchaudio|nvidia-|triton)([=<>~! ]|$)' requirements.txt > /tmp/requirements.runtime.txt \
+    && python -m pip install -r /tmp/requirements.runtime.txt
 
 COPY app /app/app
 
