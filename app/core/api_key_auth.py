@@ -36,6 +36,24 @@ def _get_expected_api_key() -> Optional[str]:
     return os.getenv("AUDIENCE_API_KEY") or _read_dotenv_value("AUDIENCE_API_KEY")
 
 
+def _clean_header_value(value: Optional[str]) -> Optional[str]:
+    """
+    Normalize FastAPI-injected header values.
+
+    When called by FastAPI, values are strings or None.
+    When called directly in unit tests, default Header(...) objects can appear.
+    Treat non-string values as missing.
+    """
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        return None
+
+    value = value.strip()
+    return value or None
+
+
 def _is_production_mode() -> bool:
     return _truthy(os.getenv("PRODUCTION_MODE") or _read_dotenv_value("PRODUCTION_MODE"))
 
@@ -51,6 +69,7 @@ def _auth_required() -> bool:
 
 def require_audience_api_key(
     x_audience_api_key: Optional[str] = Header(default=None, alias="X-Audience-API-Key"),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ) -> bool:
     """
@@ -58,6 +77,7 @@ def require_audience_api_key(
 
     Accepted auth:
     - X-Audience-API-Key: <key>
+    - X-API-Key: <key>
     - Authorization: Bearer <key>
 
     Fail-closed in production if API key is missing from env/.env.
@@ -74,12 +94,13 @@ def require_audience_api_key(
             detail="Audience API key is required but not configured.",
         )
 
-    provided = x_audience_api_key
+    provided = _clean_header_value(x_audience_api_key) or _clean_header_value(x_api_key)
+    authorization_value = _clean_header_value(authorization)
 
-    if not provided and authorization:
+    if not provided and authorization_value:
         prefix = "Bearer "
-        if authorization.startswith(prefix):
-            provided = authorization[len(prefix):].strip()
+        if authorization_value.startswith(prefix):
+            provided = authorization_value[len(prefix):].strip()
 
     if not provided:
         raise HTTPException(

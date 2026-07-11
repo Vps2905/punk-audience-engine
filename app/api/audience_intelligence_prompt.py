@@ -327,7 +327,7 @@ def audience_prompt_ui() -> str:
       try {
         const res = await fetch("/api/audience-intelligence/prompt/run", {
           method: "POST",
-          headers: {"Content-Type": "application/json", "X-Audience-API-Key": document.getElementById("apiKey").value},
+          headers: {"Content-Type": "application/json", "X-Audience-API-Key": document.getElementById("apiKey").value.trim()},
           body: JSON.stringify(payload)
         });
 

@@ -1454,26 +1454,69 @@ class AudienceIntelligenceOrchestratorAgent:
         )
 
     def _is_raw_identifier_request(self, prompt):
-        text = self._vijay_norm_text(prompt)
-        return self._vijay_has_any(
-            text,
-            [
-                "raw maid",
-                "raw maids",
-                "maid ids",
-                "maid id",
-                "device id",
-                "device ids",
-                "individual device",
-                "individual device ids",
-                "individual user",
-                "individual users",
-                "person level",
-                "user level",
-                "give me ids",
-                "export ids",
-            ],
-        )
+        """
+        Detect dangerous requests for raw identifiers.
+
+        Safe negative instructions such as "do not export raw MAIDs",
+        "block device IDs", or "remove hashes" must NOT be treated as
+        a request to receive raw identifiers.
+        """
+        import re
+
+        normalized = str(prompt or "").lower()
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+
+        identifier_terms = [
+            "raw maid",
+            "raw maids",
+            "maid id",
+            "maid ids",
+            "device id",
+            "device ids",
+            "mobile advertising id",
+            "mobile advertising ids",
+            "hashed identifier",
+            "hashed identifiers",
+            "hashes",
+            "raw hash",
+            "raw hashes",
+            "exact lat",
+            "exact lon",
+            "exact lng",
+            "lat/lon",
+            "lat lng",
+            "latitude longitude",
+            "individual user",
+            "individual users",
+            "user-level data",
+            "individual-level data",
+        ]
+
+        terms = "|".join(re.escape(term) for term in identifier_terms)
+
+        safe_negative_patterns = [
+            rf"\bdo not\b.{{0,80}}({terms})",
+            rf"\bdon't\b.{{0,80}}({terms})",
+            rf"\bnever\b.{{0,80}}({terms})",
+            rf"\bblock\b.{{0,80}}({terms})",
+            rf"\bremove\b.{{0,80}}({terms})",
+            rf"\bexclude\b.{{0,80}}({terms})",
+            rf"\bwithout\b.{{0,80}}({terms})",
+            rf"\bno\b.{{0,80}}({terms})",
+        ]
+
+        if any(re.search(item, normalized) for item in safe_negative_patterns):
+            return False
+
+        dangerous_action_patterns = [
+            rf"\b(give|show|list|display|return|export|download|send|provide|share|reveal|extract)\b.{{0,80}}({terms})",
+            rf"({terms}).{{0,80}}\b(give|show|list|display|return|export|download|send|provide|share|reveal|extract)\b",
+        ]
+
+        if any(re.search(item, normalized) for item in dangerous_action_patterns):
+            return True
+
+        return False
 
     def _is_export_action_only_request(self, prompt, locations=None, poi_terms=None, dayparts=None):
         text = self._vijay_norm_text(prompt)
