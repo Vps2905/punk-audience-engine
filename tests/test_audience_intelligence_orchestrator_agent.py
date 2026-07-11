@@ -74,6 +74,13 @@ def test_orchestrator_runs_full_prompt_pipeline_from_safe_artifact(tmp_path: Pat
     monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
     monkeypatch.setenv("PRIVACY_LEDGER_PATH", str(tmp_path / "privacy_budget.jsonl"))
 
+    # This test validates the legacy local artifact flow.
+    # Prevent production backend environment variables from leaking in
+    # from the developer shell.
+    monkeypatch.setenv("VECTOR_BACKEND", "local")
+    monkeypatch.setenv("ALL_SAFE_COHORT_EMBEDDING_STORE", "local")
+    monkeypatch.setenv("ALLOW_LOCAL_FILE_STORAGE", "true")
+
     safe_path = tmp_path / "safe_cohorts.csv"
     sample_safe_cohorts().to_csv(safe_path, index=False)
 

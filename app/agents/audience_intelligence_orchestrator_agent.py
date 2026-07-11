@@ -21,6 +21,8 @@ from app.agents.autonomous_v2_swarm_review_agent import AutonomousV2SwarmReviewA
 from app.services.autonomous_audience_intelligence_v2_service import (
     AutonomousAudienceIntelligenceV2Service,
 )
+from app.services.embedding_service import embed_records
+from app.services.vector_store_service import load_vector_store
 
 
 class AudienceIntelligenceOrchestratorAgent:
@@ -326,32 +328,20 @@ class AudienceIntelligenceOrchestratorAgent:
         print("SYNTHETIC ENGINE:", synthetic_result.get("engine") or synthetic_result.get("engine_used"))
         print()
 
-        embedding_agent = EmbeddingFeatureStoreAgent()
-        embedding_result = embedding_agent.build(
-            cohorts=selected_cohorts,
-            output_dir=embedding_dir,
-            embedding_provider="sklearn_tfidf",
-            run_id=f"{run_id}_embedding",
-            max_features=384,
+        embedding_result, cohort_result = self._run_embedding_and_cohort_management(
+            selected_cohorts=selected_cohorts,
+            embedding_dir=embedding_dir,
+            cohort_dir=cohort_dir,
+            run_id=run_id,
+            min_export_quality=min_export_quality,
         )
 
         print("EMBEDDING STATUS:", embedding_result["status"])
+        print("EMBEDDING BACKEND:", embedding_result.get("embedding_provider"))
+        print("VECTOR BACKEND:", embedding_result.get("vector_backend"))
         print("VECTOR COUNT:", embedding_result["vector_count"])
         print("VECTOR DIM:", embedding_result["vector_dimension"])
         print()
-
-        cohort_agent = CohortManagementAgent()
-        cohort_result = cohort_agent.run_from_artifacts(
-            metadata_path=embedding_result["outputs"]["cohort_metadata"],
-            vectors_path=embedding_result["outputs"]["cohort_vectors"],
-            output_dir=cohort_dir,
-            run_id=f"{run_id}_cohort_management",
-            min_clusters=2,
-            max_clusters=8,
-            top_n=25,
-            lookalike_top_k=3,
-            min_export_quality=min_export_quality,
-        )
 
         print("COHORT MANAGEMENT STATUS:", cohort_result["status"])
         print("MANAGED COHORTS:", cohort_result["managed_cohorts"])
@@ -456,6 +446,128 @@ class AudienceIntelligenceOrchestratorAgent:
         print("SAFE EXPORT:", export_result["outputs"]["safe_export_manifest"])
 
         return final_summary
+
+    def _run_embedding_and_cohort_management(
+        self,
+        *,
+        selected_cohorts: pd.DataFrame,
+        embedding_dir: Path,
+        cohort_dir: Path,
+        run_id: str,
+        min_export_quality: float,
+    ):
+        """
+        Use the active Postgres vector backend in production-style environments.
+
+        Local development and tests retain the legacy artifact flow until the
+        remaining cohort/export artifacts are migrated in Sprint 4B.
+        """
+        vector_backend = os.getenv("VECTOR_BACKEND", "local").strip().lower()
+        postgres_backends = {
+            "postgres",
+            "postgres_array",
+            "pg_array",
+            "pgvector",
+        }
+
+        if vector_backend in postgres_backends:
+            embedding_job_id = f"{run_id}_embedding"
+            safe_records = (
+                selected_cohorts
+                .reset_index(drop=True)
+                .to_dict(orient="records")
+            )
+
+            raw_embedding_result = embed_records(
+                job_id=embedding_job_id,
+                records=safe_records,
+            )
+
+            vector_store = load_vector_store(embedding_job_id)
+            vectors = np.asarray(vector_store.get("vectors"), dtype=float)
+            metadata = pd.DataFrame(vector_store.get("metadata") or [])
+
+            if vectors.ndim != 2:
+                raise ValueError(
+                    "Postgres embedding store returned vectors that are not two-dimensional."
+                )
+
+            if metadata.empty:
+                raise ValueError(
+                    "Postgres embedding store returned empty cohort metadata."
+                )
+
+            if len(metadata) != vectors.shape[0]:
+                raise ValueError(
+                    "Postgres embedding metadata row count does not match vector count."
+                )
+
+            vector_dimension = int(vectors.shape[1])
+            if vector_dimension != 384:
+                raise ValueError(
+                    f"Production main embedding dimension must be 384, got {vector_dimension}."
+                )
+
+            embedding_result = {
+                "module": "Embedding & Feature Store",
+                "status": raw_embedding_result.get("status", "completed"),
+                "run_id": embedding_job_id,
+                "embedding_provider": raw_embedding_result.get("embedding_backend"),
+                "model_name": raw_embedding_result.get("model_name"),
+                "vector_backend": vector_backend,
+                "vector_count": int(vectors.shape[0]),
+                "vector_dimension": vector_dimension,
+                "vectors_normalized": True,
+                "metadata_rows": int(len(metadata)),
+                "raw_maids_exported": False,
+                "raw_observations_exported": False,
+                "raw_lat_lng_exported": False,
+                "raw_email_exported": False,
+                "raw_phone_exported": False,
+                "individual_user_data_exported": False,
+                "outputs": {
+                    "cohort_vectors": raw_embedding_result.get("vectors_path"),
+                    "cohort_metadata": raw_embedding_result.get("metadata_path"),
+                    "embedding_model": raw_embedding_result.get("model_path"),
+                },
+            }
+
+            cohort_result = CohortManagementAgent().run(
+                metadata=metadata,
+                vectors=vectors,
+                output_dir=cohort_dir,
+                run_id=f"{run_id}_cohort_management",
+                min_clusters=2,
+                max_clusters=8,
+                top_n=25,
+                lookalike_top_k=3,
+                min_export_quality=min_export_quality,
+            )
+
+            return embedding_result, cohort_result
+
+        # Local development/test compatibility path.
+        embedding_result = EmbeddingFeatureStoreAgent().build(
+            cohorts=selected_cohorts,
+            output_dir=embedding_dir,
+            embedding_provider="sklearn_tfidf",
+            run_id=f"{run_id}_embedding",
+            max_features=384,
+        )
+
+        cohort_result = CohortManagementAgent().run_from_artifacts(
+            metadata_path=embedding_result["outputs"]["cohort_metadata"],
+            vectors_path=embedding_result["outputs"]["cohort_vectors"],
+            output_dir=cohort_dir,
+            run_id=f"{run_id}_cohort_management",
+            min_clusters=2,
+            max_clusters=8,
+            top_n=25,
+            lookalike_top_k=3,
+            min_export_quality=min_export_quality,
+        )
+
+        return embedding_result, cohort_result
 
     def _build_freshness_guardrail(self, v2_result: Dict[str, Any]) -> Dict[str, Any]:
         """
