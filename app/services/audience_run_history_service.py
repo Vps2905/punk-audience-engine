@@ -272,43 +272,122 @@ class AudienceRunHistoryService:
 
 
     def _approval_blockers(self, final_summary: Dict[str, Any]) -> List[str]:
-        """Return hard blockers that must prevent approval/export."""
+        """
+        Return hard blockers that must prevent approval and downstream export.
+
+        Only a clean pending_approval package may move to approved.
+        Blocked, rejected, failed, stale, already-approved, or unsafe packages
+        must fail closed.
+        """
         blockers: List[str] = []
 
         final_summary = final_summary or {}
         safe_export = final_summary.get("safe_export") or {}
         v2 = final_summary.get("v2_autonomous") or {}
         swarm = final_summary.get("v2_swarm_review") or {}
-        freshness = v2.get("data_freshness") or {}
+        v2_freshness = v2.get("data_freshness") or {}
+        source_freshness = final_summary.get("source_freshness") or {}
+        prompt_filter_report = final_summary.get("prompt_filter_report") or {}
+        privacy = final_summary.get("privacy_guarantees") or {}
 
-        overall_review_status = str(
+        def normalize(value: Any) -> str:
+            return str(value or "").strip().lower()
+
+        # Approval-state enforcement.
+        approval_sources = {
+            "run": final_summary.get("approval_status"),
+            "safe_export": safe_export.get("approval_status"),
+            "privacy_guarantees": privacy.get("approval_status"),
+        }
+
+        terminal_blocked_statuses = {
+            "blocked",
+            "blocked_approval",
+            "blocked_stale_source",
+            "blocked_no_safe_exact_match",
+            "blocked_privacy_budget",
+            "rejected",
+            "failed",
+            "error",
+            "not_ready",
+        }
+
+        for source, value in approval_sources.items():
+            status = normalize(value)
+
+            if not status:
+                continue
+
+            if status.startswith("blocked_") or status in terminal_blocked_statuses:
+                blockers.append(f"{source} approval_status is {status}.")
+
+            # Prevent repeat approval and repeat privacy-budget spending.
+            if status == "approved":
+                blockers.append(
+                    f"{source} approval_status is already approved; "
+                    "repeat approval is not allowed."
+                )
+
+            if status == "not_required":
+                blockers.append(
+                    f"{source} approval_status is not_required; "
+                    "manual approval is not applicable."
+                )
+
+        # Freshness can be surfaced at several levels.
+        freshness_values = [
+            final_summary.get("freshness_status"),
+            source_freshness.get("freshness_status"),
+            source_freshness.get("status"),
+            v2_freshness.get("freshness_status"),
+            v2_freshness.get("status"),
+            swarm.get("freshness_status"),
+        ]
+
+        normalized_freshness = {
+            normalize(value)
+            for value in freshness_values
+            if normalize(value)
+        }
+
+        if normalized_freshness.intersection({"stale", "expired", "outdated"}):
+            blockers.append(
+                "Source freshness is stale; refresh or verify Echo/Postgres "
+                "source before approval."
+            )
+
+        if bool(v2_freshness.get("stale_data_warning")):
+            blockers.append("Freshness agent raised stale_data_warning.")
+
+        # Fail closed on all export-block representations.
+        export_is_blocked = bool(
+            final_summary.get("block_export")
+            or safe_export.get("block_export")
+            or safe_export.get("export_blocked")
+            or safe_export.get("export_blocked_until_source_refresh")
+        )
+
+        if export_is_blocked:
+            blockers.append("Safe export is explicitly blocked.")
+
+        filter_mode = normalize(prompt_filter_report.get("filter_mode"))
+        blocked_filter_modes = {
+            "location_category_gap_no_export",
+            "broad_location_no_export",
+            "raw_identifier_request_blocked",
+        }
+
+        if filter_mode in blocked_filter_modes:
+            blockers.append(f"Prompt filter mode blocks approval: {filter_mode}.")
+
+        overall_review_status = normalize(
             swarm.get("overall_review_status")
             or swarm.get("status")
-            or ""
-        ).lower().strip()
-
-        freshness_status = str(
-            swarm.get("freshness_status")
-            or freshness.get("freshness_status")
-            or ""
-        ).lower().strip()
+        )
 
         if overall_review_status == "blocked":
             blockers.append("Swarm review status is blocked.")
 
-        if freshness_status == "stale":
-            blockers.append("Source freshness is stale; refresh or verify Echo/Postgres source before approval.")
-
-        if bool(freshness.get("stale_data_warning", False)):
-            blockers.append("Freshness agent raised stale_data_warning.")
-
-        if bool(safe_export.get("export_blocked", False)):
-            blockers.append("Safe export is marked export_blocked.")
-
-        if bool(safe_export.get("export_blocked_until_approved", False)) and not safe_export.get("approval_status") == "pending_approval":
-            blockers.append("Safe export has inconsistent approval/export state.")
-
-        privacy = final_summary.get("privacy_guarantees") or {}
         raw_flags = [
             "raw_maids_exported",
             "hashed_identifiers_exported",
@@ -321,9 +400,21 @@ class AudienceRunHistoryService:
 
         leaked = [flag for flag in raw_flags if bool(privacy.get(flag))]
         if leaked:
-            blockers.append(f"Privacy guarantee failed; unsafe export flags detected: {', '.join(leaked)}")
+            blockers.append(
+                "Privacy guarantee failed; unsafe export flags detected: "
+                + ", ".join(leaked)
+            )
 
-        return blockers
+        if export_is_blocked and bool(
+            final_summary.get("downstream_export_enabled")
+            or safe_export.get("downstream_export_enabled")
+        ):
+            blockers.append(
+                "Unsafe state: downstream export is enabled while export is blocked."
+            )
+
+        # Keep blocker output deterministic and duplicate-free.
+        return list(dict.fromkeys(blockers))
 
     def approve_run(
         self,

@@ -121,6 +121,7 @@ def _collect_job_approval_blockers(
     }
 
     status_sources = {
+        "result": result.get("approval_status"),
         "result.safe_export": safe_export.get("approval_status"),
         "manifest": manifest.get("approval_status"),
         "payload": payload.get("approval_status"),
@@ -129,7 +130,7 @@ def _collect_job_approval_blockers(
 
     for source, status in status_sources.items():
         status_norm = _job_norm(status)
-        if status_norm in blocked_statuses:
+        if status_norm in blocked_statuses or status_norm.startswith("blocked_"):
             blockers.append(f"{source} approval_status is {status_norm}.")
 
     freshness_values = [
@@ -227,7 +228,40 @@ def _collect_job_approval_blockers(
         if blocker not in deduped:
             deduped.append(blocker)
 
-    return deduped
+
+    top_level_freshness = str(
+        result.get("freshness_status")
+        or _job_nested_get(
+            result,
+            "source_freshness",
+            "freshness_status",
+        )
+        or ""
+    ).strip().lower()
+
+    if top_level_freshness in {"stale", "expired", "outdated"}:
+        blockers.append(
+            "Source data is stale; refresh or verify source data before approval."
+        )
+
+    explicit_export_block = bool(
+        result.get("block_export")
+        or safe_export.get("block_export")
+        or safe_export.get("export_blocked")
+        or safe_export.get("export_blocked_until_source_refresh")
+        or manifest.get("block_export")
+        or manifest.get("export_blocked")
+        or manifest.get("export_blocked_until_source_refresh")
+        or payload.get("block_export")
+        or approval.get("block_export")
+    )
+
+    if explicit_export_block:
+        blockers.append(
+            "Export is explicitly blocked by production safety guardrails."
+        )
+
+    return list(dict.fromkeys(blockers))
 
 
 def _run_job_background(job_id: str) -> None:
