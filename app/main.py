@@ -13,6 +13,7 @@ from app.api.full_pipeline_routes import router as full_pipeline_router
 
 ensure_data_dirs()
 
+from app.api.health_routes import router as health_router
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
@@ -121,3 +122,6 @@ app.include_router(audience_intelligence_source_health_router)
 
 from app.api.audience_intelligence_swarm import router as audience_intelligence_swarm_router
 app.include_router(audience_intelligence_swarm_router)
+
+# Production health/readiness routes
+app.include_router(health_router)

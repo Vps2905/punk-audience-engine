@@ -1,51 +1,53 @@
-name: Audience Intelligence CI
+name: CI
 
 on:
   push:
-    branches: [ "*" ]
+    branches:
+      - audience-intelligence-agents
   pull_request:
-    branches: [ "*" ]
+    branches:
+      - main
+      - dev
+      - audience-intelligence-agents
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     env:
-      PRODUCTION_MODE: true
-      REQUIRE_AUDIENCE_API_KEY: true
-      SYNTHETIC_ENGINE: dp_aggregate
-      ALLOW_SYNTHETIC_FALLBACK: false
-      K_ANONYMITY_MIN: 1000
-      AUDIENCE_API_KEY: test_key_ci_runner
+      APP_ENV: local
+      PRODUCTION_MODE: "false"
+      REQUIRE_AUDIENCE_API_KEY: "false"
+      AUDIENCE_API_KEY: test-key
+      ECHO_DATABASE_URL: postgresql://user:pass@localhost:5432/testdb
+      HASH_SECRET: test-hash-secret
+      AUDIENCE_HASH_SALT: test-audience-salt
+      ALLOW_LOCAL_FILE_STORAGE: "true"
+      ALLOW_DEMO_ROUTES: "true"
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install pytest
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
 
-    - name: Run Compile Check
-      run: |
-        python3 -m compileall app scripts
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Run Pytest
-      run: |
-        PYTHONPATH=. pytest -q \
-          tests/test_synthetic_engine_agent.py \
-          tests/test_synthetic_engine_agent_production_paths.py \
-          tests/test_privacy_layer_agent.py \
-          tests/test_embedding_feature_store_agent.py \
-          tests/test_cohort_management_agent.py \
-          tests/test_safe_export_agent.py \
-          tests/test_audience_intelligence_orchestrator_agent.py \
-          tests/test_audience_job_store.py \
-          tests/test_audience_swarm_monitor_agent.py \
-          tests/test_audience_api_key_auth.py
+      - name: Compile app
+        run: |
+          python -m compileall app
+
+      - name: Run full test suite
+        run: |
+          PYTHONPATH=. python -m pytest -q
