@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -265,14 +266,19 @@ class AudienceRunHistoryService:
 
         limit = max(1, min(int(limit), 200))
         offset = max(0, int(offset))
-        min_quality = max(0.0, float(min_quality))
+        min_quality = max(
+            0.0,
+            min(float(min_quality), 1.0),
+        )
 
         where = [
             "run_id = :run_id",
-            "COALESCE("
-            "management_quality_score, "
-            "quality_score, 0"
-            ") >= :min_quality",
+            (
+                "COALESCE("
+                "management_quality_score, "
+                "quality_score, 0"
+                ") >= :min_quality"
+            ),
         ]
 
         params: Dict[str, Any] = {
@@ -322,8 +328,11 @@ class AudienceRunHistoryService:
 
             run_exists = conn.execute(
                 text(
-                    "SELECT 1 FROM audience_run_history "
-                    "WHERE run_id = :run_id"
+                    """
+                    SELECT 1
+                    FROM audience_run_history
+                    WHERE run_id = :run_id
+                    """
                 ),
                 {"run_id": run_id},
             ).scalar()
@@ -335,6 +344,19 @@ class AudienceRunHistoryService:
                     "run_id": run_id,
                     "cohorts": [],
                 }
+
+            total_count = int(
+                conn.execute(
+                    text(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM audience_run_cohorts
+                        WHERE {where_sql}
+                        """
+                    ),
+                    params,
+                ).scalar_one()
+            )
 
             rows = conn.execute(
                 text(
@@ -363,20 +385,31 @@ class AudienceRunHistoryService:
                             quality_score,
                             0
                         ) DESC,
-                        created_at ASC
+                        export_cohort_id ASC
                     LIMIT :limit OFFSET :offset
                     """
                 ),
                 params,
             ).fetchall()
 
+        returned_count = len(rows)
+        next_offset = offset + returned_count
+        has_more = next_offset < total_count
+
         return {
             "enabled": True,
             "status": "ok",
             "run_id": run_id,
-            "count": len(rows),
+            # Backward-compatible field.
+            "count": returned_count,
+            "returned_count": returned_count,
+            "total_count": total_count,
             "limit": limit,
             "offset": offset,
+            "has_more": has_more,
+            "next_offset": (
+                next_offset if has_more else None
+            ),
             "cohorts": [
                 self._row_to_dict(row)
                 for row in rows
@@ -1170,16 +1203,22 @@ class AudienceRunHistoryService:
                 CREATE TABLE IF NOT EXISTS audience_run_cohorts (
                     id BIGSERIAL PRIMARY KEY,
                     run_id TEXT NOT NULL,
+                    export_cohort_id TEXT NOT NULL,
                     audience_name TEXT,
                     location_name TEXT,
                     primary_poi_type TEXT,
                     created_day_part TEXT,
+                    lookback_bucket TEXT,
                     quality_score DOUBLE PRECISION,
+                    management_quality_score DOUBLE PRECISION,
                     approval_status TEXT,
+                    privacy_mode TEXT,
+                    data_safety_status TEXT,
                     risk_decision TEXT,
                     risk_level TEXT,
                     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (run_id, export_cohort_id)
                 );
                 """
             )
@@ -1225,6 +1264,76 @@ class AudienceRunHistoryService:
                 "CREATE INDEX IF NOT EXISTS "
                 "idx_audience_run_cohorts_poi "
                 "ON audience_run_cohorts(primary_poi_type);"
+            )
+        )
+
+        # Backfill historical cohort rows that predate
+        # normalized export cohort IDs.
+        conn.execute(
+            text(
+                """
+                UPDATE audience_run_cohorts
+                SET export_cohort_id =
+                    'legacy_' || md5(
+                        run_id || ':' || id::text
+                    )
+                WHERE export_cohort_id IS NULL
+                   OR BTRIM(export_cohort_id) = ''
+                """
+            )
+        )
+
+        # Keep the newest row if an older database already
+        # contains a duplicate normalized cohort.
+        conn.execute(
+            text(
+                """
+                DELETE FROM audience_run_cohorts older
+                USING audience_run_cohorts newer
+                WHERE older.run_id = newer.run_id
+                  AND older.export_cohort_id =
+                      newer.export_cohort_id
+                  AND older.id < newer.id
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                ALTER TABLE audience_run_cohorts
+                ALTER COLUMN export_cohort_id
+                SET NOT NULL
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                uq_audience_run_cohorts_run_export
+                ON audience_run_cohorts(
+                    run_id,
+                    export_cohort_id
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_audience_run_cohorts_filter
+                ON audience_run_cohorts(
+                    run_id,
+                    approval_status,
+                    created_day_part,
+                    location_name,
+                    primary_poi_type
+                )
+                """
             )
         )
 
@@ -1439,15 +1548,40 @@ class AudienceRunHistoryService:
         run_id: str,
         rows: List[Dict[str, Any]],
     ) -> None:
+        # Serialize concurrent persistence attempts for
+        # the same run.
         conn.execute(
             text(
-                "DELETE FROM audience_run_cohorts "
-                "WHERE run_id = :run_id"
+                """
+                SELECT pg_advisory_xact_lock(
+                    hashtext(:run_id)
+                )
+                """
+            ),
+            {"run_id": run_id},
+        )
+
+        conn.execute(
+            text(
+                """
+                DELETE FROM audience_run_cohorts
+                WHERE run_id = :run_id
+                """
             ),
             {"run_id": run_id},
         )
 
         for row in rows:
+            export_cohort_id = str(
+                row.get("export_cohort_id") or ""
+            ).strip()
+
+            if not export_cohort_id:
+                raise ValueError(
+                    "Normalized cohort is missing "
+                    "export_cohort_id."
+                )
+
             quality_value = row.get("quality_score")
 
             if quality_value is None:
@@ -1468,6 +1602,7 @@ class AudienceRunHistoryService:
                 )
                 or row.get("export_status")
                 or row.get("approval_status")
+                or "pending_approval"
             )
 
             metadata = {
@@ -1484,6 +1619,50 @@ class AudienceRunHistoryService:
                 metadata[
                     "normalized_source"
                 ] = normalized_source
+
+            params = {
+                "run_id": run_id,
+                "export_cohort_id": export_cohort_id,
+                "audience_name": row.get(
+                    "audience_name"
+                ),
+                "location_name": row.get(
+                    "location_name"
+                ),
+                "primary_poi_type": row.get(
+                    "primary_poi_type"
+                ),
+                "created_day_part": row.get(
+                    "created_day_part"
+                ),
+                "lookback_bucket": row.get(
+                    "lookback_bucket"
+                ),
+                "quality_score": self._safe_float(
+                    quality_value
+                ),
+                "management_quality_score": (
+                    self._safe_float(
+                        management_quality
+                    )
+                ),
+                "approval_status": approval_status,
+                "privacy_mode": row.get(
+                    "privacy_mode"
+                ),
+                "data_safety_status": row.get(
+                    "data_safety_status"
+                ),
+                "risk_decision": row.get(
+                    "risk_decision"
+                ),
+                "risk_level": row.get(
+                    "risk_level"
+                ),
+                "metadata": json.dumps(
+                    self._clean_json(metadata)
+                ),
+            }
 
             conn.execute(
                 text(
@@ -1522,54 +1701,31 @@ class AudienceRunHistoryService:
                         :risk_level,
                         CAST(:metadata AS jsonb)
                     )
+                    ON CONFLICT (
+                        run_id,
+                        export_cohort_id
+                    )
+                    DO UPDATE SET
+                        audience_name = EXCLUDED.audience_name,
+                        location_name = EXCLUDED.location_name,
+                        primary_poi_type = EXCLUDED.primary_poi_type,
+                        created_day_part = EXCLUDED.created_day_part,
+                        lookback_bucket = EXCLUDED.lookback_bucket,
+                        quality_score = EXCLUDED.quality_score,
+                        management_quality_score =
+                            EXCLUDED.management_quality_score,
+                        approval_status =
+                            EXCLUDED.approval_status,
+                        privacy_mode = EXCLUDED.privacy_mode,
+                        data_safety_status =
+                            EXCLUDED.data_safety_status,
+                        risk_decision = EXCLUDED.risk_decision,
+                        risk_level = EXCLUDED.risk_level,
+                        metadata = EXCLUDED.metadata,
+                        created_at = now()
                     """
                 ),
-                {
-                    "run_id": run_id,
-                    "export_cohort_id": (
-                        row.get("export_cohort_id")
-                        or row.get("cohort_id")
-                    ),
-                    "audience_name": row.get(
-                        "audience_name"
-                    ),
-                    "location_name": row.get(
-                        "location_name"
-                    ),
-                    "primary_poi_type": row.get(
-                        "primary_poi_type"
-                    ),
-                    "created_day_part": row.get(
-                        "created_day_part"
-                    ),
-                    "lookback_bucket": row.get(
-                        "lookback_bucket"
-                    ),
-                    "quality_score": self._safe_float(
-                        quality_value
-                    ),
-                    "management_quality_score": (
-                        self._safe_float(
-                            management_quality
-                        )
-                    ),
-                    "approval_status": approval_status,
-                    "privacy_mode": row.get(
-                        "privacy_mode"
-                    ),
-                    "data_safety_status": row.get(
-                        "data_safety_status"
-                    ),
-                    "risk_decision": row.get(
-                        "risk_decision"
-                    ),
-                    "risk_level": row.get(
-                        "risk_level"
-                    ),
-                    "metadata": json.dumps(
-                        self._clean_json(metadata)
-                    ),
-                },
+                params,
             )
 
     def _replace_artifacts(self, conn, run_id: str, rows: List[Dict[str, Any]]) -> None:
@@ -1676,16 +1832,16 @@ class AudienceRunHistoryService:
         ) = None,
     ) -> List[Dict[str, Any]]:
         """
-        Build normalized, privacy-safe cohort rows.
+        Build deterministic, normalized cohort records.
 
         Source priority:
-        1. Production safe-export package stored in JSONB.
-        2. Explicitly supplied selected cohorts.
-        3. Legacy top-level safe-export cohort records.
-        4. Legacy local CSV artifact when available.
+        1. safe_export.package.cohorts
+        2. selected_cohorts
+        3. legacy final_summary safe-export rows
+        4. legacy local CSV artifact
 
-        The production package is authoritative because it contains
-        the final privacy-filtered, exportable cohort selection.
+        Duplicate export cohort IDs are collapsed before
+        persistence. The highest-quality record wins.
         """
         safe_export = (
             final_summary.get("safe_export") or {}
@@ -1724,7 +1880,9 @@ class AudienceRunHistoryService:
 
         if not rows:
             legacy_rows = (
-                final_summary.get("safe_export_cohorts")
+                final_summary.get(
+                    "safe_export_cohorts"
+                )
                 or []
             )
 
@@ -1737,21 +1895,17 @@ class AudienceRunHistoryService:
 
                 if rows:
                     source = (
-                        "final_summary.safe_export_cohorts"
+                        "final_summary."
+                        "safe_export_cohorts"
                     )
 
         if not rows:
             outputs = safe_export.get("outputs") or {}
-            cohorts_path = outputs.get(
-                "safe_export_cohorts"
-            )
-
             path_value = str(
-                cohorts_path or ""
+                outputs.get("safe_export_cohorts")
+                or ""
             ).strip()
 
-            # Production artifact references use postgres://.
-            # Only legacy local paths may be read through pandas.
             if path_value and "://" not in path_value:
                 local_path = Path(path_value)
 
@@ -1767,10 +1921,11 @@ class AudienceRunHistoryService:
         authoritative_approval = str(
             safe_export.get("approval_status")
             or final_summary.get("approval_status")
-            or ""
+            or "pending_approval"
         ).strip()
 
-        normalized: List[Dict[str, Any]] = []
+        deduplicated: Dict[str, Dict[str, Any]] = {}
+        insertion_order: List[str] = []
 
         for item in rows:
             clean_item = self._clean_json(item)
@@ -1778,20 +1933,111 @@ class AudienceRunHistoryService:
             if not isinstance(clean_item, dict):
                 continue
 
-            clean_item["_normalized_source"] = source
+            export_cohort_id = str(
+                clean_item.get("export_cohort_id")
+                or clean_item.get("cohort_id")
+                or ""
+            ).strip()
 
-            row_approval = (
-                authoritative_approval
-                or clean_item.get("export_status")
-                or clean_item.get("approval_status")
-                or "pending_approval"
-            )
+            if not export_cohort_id:
+                identity = {
+                    "audience_name": clean_item.get(
+                        "audience_name"
+                    ),
+                    "location_name": clean_item.get(
+                        "location_name"
+                    ),
+                    "primary_poi_type": clean_item.get(
+                        "primary_poi_type"
+                    ),
+                    "created_day_part": clean_item.get(
+                        "created_day_part"
+                    ),
+                    "lookback_bucket": clean_item.get(
+                        "lookback_bucket"
+                    ),
+                    "cluster_id": clean_item.get(
+                        "cluster_id"
+                    ),
+                }
+
+                canonical = json.dumps(
+                    self._clean_json(identity),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+
+                digest = hashlib.sha256(
+                    f"{run_id}|{canonical}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()[:16]
+
+                export_cohort_id = (
+                    f"punk_audience_{digest}"
+                )
 
             clean_item[
+                "export_cohort_id"
+            ] = export_cohort_id
+            clean_item[
+                "_normalized_source"
+            ] = source
+            clean_item[
                 "_normalized_approval_status"
-            ] = str(row_approval)
+            ] = authoritative_approval
 
-            normalized.append(clean_item)
+            existing = deduplicated.get(
+                export_cohort_id
+            )
+
+            if existing is None:
+                deduplicated[
+                    export_cohort_id
+                ] = clean_item
+                insertion_order.append(
+                    export_cohort_id
+                )
+                continue
+
+            existing_quality = self._safe_float(
+                existing.get(
+                    "management_quality_score"
+                )
+            )
+
+            if existing_quality is None:
+                existing_quality = self._safe_float(
+                    existing.get("quality_score")
+                )
+
+            incoming_quality = self._safe_float(
+                clean_item.get(
+                    "management_quality_score"
+                )
+            )
+
+            if incoming_quality is None:
+                incoming_quality = self._safe_float(
+                    clean_item.get("quality_score")
+                )
+
+            if (
+                incoming_quality is not None
+                and (
+                    existing_quality is None
+                    or incoming_quality
+                    > existing_quality
+                )
+            ):
+                deduplicated[
+                    export_cohort_id
+                ] = clean_item
+
+        normalized = [
+            deduplicated[export_id]
+            for export_id in insertion_order
+        ]
 
         return self._apply_sensitive_risk_to_cohort_rows(
             rows=normalized,
