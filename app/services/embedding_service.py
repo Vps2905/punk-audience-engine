@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import unicodedata
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -8,12 +10,115 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import HashingVectorizer, TfidfVectorizer
 
-from app.services.vector_store_service import load_vector_store, save_vector_store, similarity_search
+from app.services.vector_store_service import (
+    load_vector_store,
+    save_vector_store,
+    similarity_search,
+)
+from app.services.postgres_vector_store_service import (
+    load_postgres_vector_model_info,
+)
 from app.core.production_guardrails import require_local_file_storage_allowed
 
 
 PROCESSED_DIR = Path("data/processed")
 VECTOR_DIR = Path("data/vectors")
+
+
+_QUERY_ONTOLOGY_ALIASES = {
+    "coffee shop": (
+        "cafe",
+        "primary_poi_type cafe",
+    ),
+    "coffeehouse": (
+        "cafe",
+        "primary_poi_type cafe",
+    ),
+    "espresso bar": (
+        "cafe",
+        "primary_poi_type cafe",
+    ),
+    "co working": (
+        "coworking_space",
+        "coworking space",
+    ),
+    "coworking": (
+        "coworking_space",
+        "coworking space",
+    ),
+    "fitness center": (
+        "gym",
+        "primary_poi_type gym",
+    ),
+    "fitness centre": (
+        "gym",
+        "primary_poi_type gym",
+    ),
+    "supermarket": (
+        "grocery_store",
+        "grocery store",
+    ),
+    "barbershop": (
+        "barber_shop",
+        "barber shop",
+    ),
+}
+
+
+def normalize_embedding_query(query: str) -> str:
+    """
+    Enrich user language with normalized audience taxonomy
+    terms used by stored embedding metadata.
+    """
+    original = " ".join(
+        str(query or "").strip().split()
+    )
+
+    if not original:
+        raise ValueError("query cannot be empty.")
+
+    searchable = unicodedata.normalize(
+        "NFKD",
+        original,
+    )
+    searchable = searchable.encode(
+        "ascii",
+        "ignore",
+    ).decode("ascii").lower()
+
+    searchable = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        searchable,
+    )
+    searchable = " ".join(searchable.split())
+
+    additions = []
+
+    for alias, canonical_terms in (
+        _QUERY_ONTOLOGY_ALIASES.items()
+    ):
+        if alias not in searchable:
+            continue
+
+        for canonical in canonical_terms:
+            canonical_search = canonical.replace(
+                "_",
+                " ",
+            ).lower()
+
+            if (
+                canonical_search not in searchable
+                and canonical not in additions
+            ):
+                additions.append(canonical)
+
+    if not additions:
+        return original
+
+    return " ".join(
+        [original, *additions]
+    )
 
 
 def processed_path_for_job(job_id: str) -> Path:
@@ -50,7 +155,22 @@ def dataframe_to_trait_texts(df: pd.DataFrame) -> List[str]:
 
 
 def _embedding_backend() -> str:
-    return os.getenv("EMBEDDING_BACKEND", "auto").strip().lower()
+    return os.getenv(
+        "EMBEDDING_BACKEND",
+        "auto",
+    ).strip().lower()
+
+
+def _use_postgres_vector_backend() -> bool:
+    return os.getenv(
+        "VECTOR_BACKEND",
+        "local",
+    ).strip().lower() in {
+        "postgres",
+        "postgres_array",
+        "pg_array",
+        "pgvector",
+    }
 
 
 def hashing_encode(texts: List[str], n_features: int | None = None) -> Dict[str, Any]:
@@ -233,8 +353,19 @@ def encode_query_for_job(job_id: str, query: str) -> np.ndarray:
     """
     Encodes search query using same backend used for the job.
     """
-    store = load_vector_store(job_id)
-    model_info = store["model_info"]
+    normalized_query = normalize_embedding_query(
+        query
+    )
+
+    if _use_postgres_vector_backend():
+        model_info = (
+            load_postgres_vector_model_info(
+                job_id
+            )
+        )
+    else:
+        store = load_vector_store(job_id)
+        model_info = store["model_info"]
 
     backend = model_info.get("backend")
 
@@ -244,18 +375,18 @@ def encode_query_for_job(job_id: str, query: str) -> np.ndarray:
             or model_info.get("vector_dimension")
             or os.getenv("EMBEDDING_HASHING_FEATURES", "384")
         )
-        return hashing_encode([query], n_features=dimension)["vectors"][0]
+        return hashing_encode([normalized_query], n_features=dimension)["vectors"][0]
 
     if backend == "sentence-transformers":
         from sentence_transformers import SentenceTransformer
 
         model = SentenceTransformer(model_info["model_name"])
-        return model.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
+        return model.encode([normalized_query], convert_to_numpy=True, normalize_embeddings=True)[0]
 
     if backend == "tfidf":
         vectorizer_path = model_info["vectorizer_path"]
         vectorizer = joblib.load(vectorizer_path)
-        return vectorizer.transform([query]).toarray()[0]
+        return vectorizer.transform([normalized_query]).toarray()[0]
 
     raise ValueError(f"Unknown embedding backend: {backend}")
 
@@ -271,12 +402,16 @@ def search_similar_audiences(
     min_quality: float | None = None,
 ) -> Dict[str, Any]:
     """
-    Search privacy-safe audience records using semantic
-    similarity and optional cohort metadata filters.
+    Search privacy-safe audience vectors with optional
+    structured metadata filters.
     """
+    normalized_query = normalize_embedding_query(
+        query
+    )
+
     query_vector = encode_query_for_job(
         job_id,
-        query,
+        normalized_query,
     )
 
     results = similarity_search(
@@ -292,6 +427,7 @@ def search_similar_audiences(
     return {
         "job_id": job_id,
         "query": query,
+        "normalized_query": normalized_query,
         "top_k": top_k,
         "filters": {
             "location_name": location_name,

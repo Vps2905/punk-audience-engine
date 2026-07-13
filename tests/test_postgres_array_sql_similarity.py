@@ -195,3 +195,29 @@ def test_similarity_search_rejects_zero_vector(
                 [0.0, 0.0, 0.0]
             ),
         )
+
+
+def test_schema_readiness_is_cached(
+    monkeypatch,
+):
+    calls = {"schema": 0}
+
+    def fake_schema():
+        calls["schema"] += 1
+
+    monkeypatch.setattr(
+        service,
+        "_SCHEMA_READY",
+        False,
+    )
+
+    monkeypatch.setattr(
+        service,
+        "ensure_postgres_vector_schema",
+        fake_schema,
+    )
+
+    service._ensure_postgres_vector_schema_once()
+    service._ensure_postgres_vector_schema_once()
+
+    assert calls["schema"] == 1

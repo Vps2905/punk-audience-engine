@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
+import threading
+import unicodedata
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import psycopg2
 from psycopg2.extras import Json, execute_values
+from psycopg2.pool import ThreadedConnectionPool
 
 
 def _db_url() -> str:
@@ -18,8 +23,68 @@ def _db_url() -> str:
     return value
 
 
+_POOL: ThreadedConnectionPool | None = None
+_POOL_LOCK = threading.Lock()
+_SCHEMA_READY = False
+_SCHEMA_LOCK = threading.Lock()
+
+
+def _pool_size() -> int:
+    raw_value = os.getenv(
+        "POSTGRES_VECTOR_POOL_SIZE",
+        "5",
+    )
+
+    try:
+        return max(2, min(int(raw_value), 20))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _get_connection_pool() -> ThreadedConnectionPool:
+    global _POOL
+
+    if _POOL is not None:
+        return _POOL
+
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = ThreadedConnectionPool(
+                minconn=1,
+                maxconn=_pool_size(),
+                dsn=_db_url(),
+            )
+
+    return _POOL
+
+
+@contextmanager
 def _connect():
-    return psycopg2.connect(_db_url())
+    """
+    Borrow a reusable Postgres connection.
+
+    This avoids a new network/TLS connection for every
+    similarity search.
+    """
+    pool = _get_connection_pool()
+    conn = pool.getconn()
+
+    try:
+        if conn.closed:
+            pool.putconn(conn, close=True)
+            conn = pool.getconn()
+
+        yield conn
+        conn.commit()
+
+    except Exception:
+        if not conn.closed:
+            conn.rollback()
+        raise
+
+    finally:
+        if not conn.closed:
+            pool.putconn(conn)
 
 
 def _json_safe(value: Any) -> Any:
@@ -130,13 +195,90 @@ def ensure_postgres_vector_schema() -> None:
             )
 
 
+
+def _ensure_postgres_vector_schema_once() -> None:
+    """
+    Ensure the vector schema once per application process.
+
+    Versioned migrations remain authoritative. This is a
+    compatibility fallback for development and new database
+    environments.
+    """
+    global _SCHEMA_READY
+
+    if _SCHEMA_READY:
+        return
+
+    with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return
+
+        ensure_postgres_vector_schema()
+        _SCHEMA_READY = True
+
+
+_POI_TYPE_ALIASES = {
+    "cafe": "cafe",
+    "coffee": "cafe",
+    "coffee_shop": "cafe",
+    "coffeehouse": "cafe",
+    "espresso_bar": "cafe",
+    "co_working": "coworking_space",
+    "coworking": "coworking_space",
+    "coworking_space": "coworking_space",
+    "fitness_center": "gym",
+    "fitness_centre": "gym",
+    "health_club": "gym",
+    "gym": "gym",
+    "grocery": "grocery_store",
+    "grocery_store": "grocery_store",
+    "supermarket": "grocery_store",
+    "barbershop": "barber_shop",
+    "barber": "barber_shop",
+    "barber_shop": "barber_shop",
+}
+
+
+def canonicalize_poi_type(
+    value: str | None,
+) -> str | None:
+    """
+    Normalize user-facing POI names to the stored taxonomy.
+    """
+    if value is None:
+        return None
+
+    normalized = unicodedata.normalize(
+        "NFKD",
+        str(value),
+    )
+
+    normalized = normalized.encode(
+        "ascii",
+        "ignore",
+    ).decode("ascii")
+
+    normalized = re.sub(
+        r"[^a-zA-Z0-9]+",
+        "_",
+        normalized.lower(),
+    ).strip("_")
+
+    if not normalized:
+        return None
+
+    return _POI_TYPE_ALIASES.get(
+        normalized,
+        normalized,
+    )
+
 def save_postgres_vector_store(
     job_id: str,
     vectors: np.ndarray,
     metadata: List[Dict[str, Any]],
     model_info: Dict[str, Any],
 ) -> Dict[str, str]:
-    ensure_postgres_vector_schema()
+    _ensure_postgres_vector_schema_once()
 
     vectors = np.asarray(vectors, dtype=float)
     if vectors.ndim != 2:
@@ -223,8 +365,63 @@ def save_postgres_vector_store(
     }
 
 
+
+def load_postgres_vector_model_info(
+    job_id: str,
+) -> Dict[str, Any]:
+    """
+    Load only embedding model metadata.
+
+    Query encoding needs the backend and dimension but must
+    not load every stored vector into application memory.
+    """
+    clean_job_id = str(job_id or "").strip()
+
+    if not clean_job_id:
+        raise ValueError("job_id cannot be empty.")
+
+    _ensure_postgres_vector_schema_once()
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    model_info,
+                    vector_count,
+                    vector_dimension
+                FROM audience_vector_models
+                WHERE job_id = %s;
+                """,
+                (clean_job_id,),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        raise FileNotFoundError(
+            "Postgres vector model not found "
+            f"for job_id={clean_job_id}"
+        )
+
+    model_info = dict(row[0] or {})
+    model_info.setdefault(
+        "vector_count",
+        int(row[1] or 0),
+    )
+    model_info.setdefault(
+        "dimension",
+        int(row[2] or 0),
+    )
+    model_info.setdefault(
+        "vector_dimension",
+        int(row[2] or 0),
+    )
+
+    return model_info
+
 def load_postgres_vector_store(job_id: str) -> Dict[str, Any]:
-    ensure_postgres_vector_schema()
+    _ensure_postgres_vector_schema_once()
 
     with _connect() as conn:
         with conn.cursor() as cur:
@@ -319,7 +516,7 @@ def postgres_similarity_search(
         min(int(top_k), 200),
     )
 
-    ensure_postgres_vector_schema()
+    _ensure_postgres_vector_schema_once()
 
     with _connect() as conn:
         with conn.cursor() as cur:
@@ -382,14 +579,20 @@ def postgres_similarity_search(
                     location_name
                 ).strip()
 
-            if primary_poi_type:
+            canonical_poi_type = (
+                canonicalize_poi_type(
+                    primary_poi_type
+                )
+            )
+
+            if canonical_poi_type:
                 where.append(
                     "LOWER(av.primary_poi_type) = "
                     "LOWER(%(primary_poi_type)s)"
                 )
-                params["primary_poi_type"] = str(
-                    primary_poi_type
-                ).strip()
+                params[
+                    "primary_poi_type"
+                ] = canonical_poi_type
 
             if created_day_part:
                 where.append(
@@ -488,7 +691,7 @@ def postgres_similarity_search(
 
 
 def save_postgres_cluster_output(job_id: str, clustered_df: pd.DataFrame) -> str:
-    ensure_postgres_vector_schema()
+    _ensure_postgres_vector_schema_once()
 
     with _connect() as conn:
         with conn.cursor() as cur:

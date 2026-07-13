@@ -60,3 +60,60 @@ def test_encode_query_supports_hashing_backend(monkeypatch):
 
     assert vector.shape == (384,)
     assert np.linalg.norm(vector) > 0
+
+
+def test_postgres_query_encoding_loads_model_only(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "VECTOR_BACKEND",
+        "postgres_array",
+    )
+
+    calls = {
+        "model": 0,
+        "full_store": 0,
+    }
+
+    def fake_model_loader(job_id):
+        calls["model"] += 1
+
+        assert job_id == "records_job"
+
+        return {
+            "backend": "sklearn_hashing",
+            "model_name": (
+                "sklearn_hashing_vectorizer"
+            ),
+            "dimension": 384,
+            "vector_dimension": 384,
+        }
+
+    def forbidden_full_store(job_id):
+        calls["full_store"] += 1
+
+        raise AssertionError(
+            "Postgres query encoding must not load "
+            "the complete vector store."
+        )
+
+    monkeypatch.setattr(
+        embedding_service,
+        "load_postgres_vector_model_info",
+        fake_model_loader,
+    )
+
+    monkeypatch.setattr(
+        embedding_service,
+        "load_vector_store",
+        forbidden_full_store,
+    )
+
+    vector = embedding_service.encode_query_for_job(
+        "records_job",
+        "coffee shop visitors in Montreal",
+    )
+
+    assert vector.shape == (384,)
+    assert calls["model"] == 1
+    assert calls["full_store"] == 0
