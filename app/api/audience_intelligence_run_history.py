@@ -55,6 +55,54 @@ def get_run(run_id: str) -> Dict[str, Any]:
     return result
 
 
+@router.get("/{run_id}/cohorts")
+def list_run_cohorts(
+    run_id: str,
+    location: Optional[str] = None,
+    poi_type: Optional[str] = None,
+    daypart: Optional[str] = None,
+    approval_status: Optional[str] = None,
+    min_quality: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=200,
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+    ),
+) -> Dict[str, Any]:
+    result = AudienceRunHistoryService().list_cohorts(
+        run_id=run_id,
+        location=location,
+        poi_type=poi_type,
+        daypart=daypart,
+        approval_status=approval_status,
+        min_quality=min_quality,
+        limit=limit,
+        offset=offset,
+    )
+
+    if result.get("status") == "skipped":
+        raise HTTPException(
+            status_code=503,
+            detail=result,
+        )
+
+    if result.get("status") == "not_found":
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run not found: {run_id}",
+        )
+
+    return result
+
+
 @router.get("/{run_id}/audit")
 def get_run_audit(run_id: str) -> Dict[str, Any]:
     result = AudienceRunHistoryService().get_audit(run_id)
