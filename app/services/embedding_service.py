@@ -260,21 +260,44 @@ def encode_query_for_job(job_id: str, query: str) -> np.ndarray:
     raise ValueError(f"Unknown embedding backend: {backend}")
 
 
-def search_similar_audiences(job_id: str, query: str, top_k: int = 5) -> Dict[str, Any]:
+def search_similar_audiences(
+    job_id: str,
+    query: str,
+    top_k: int = 5,
+    *,
+    location_name: str | None = None,
+    primary_poi_type: str | None = None,
+    created_day_part: str | None = None,
+    min_quality: float | None = None,
+) -> Dict[str, Any]:
     """
-    Searches similar audience rows using vector similarity.
+    Search privacy-safe audience records using semantic
+    similarity and optional cohort metadata filters.
     """
-    query_vector = encode_query_for_job(job_id, query)
+    query_vector = encode_query_for_job(
+        job_id,
+        query,
+    )
 
     results = similarity_search(
         job_id=job_id,
         query_vector=query_vector,
-        top_k=top_k
+        top_k=top_k,
+        location_name=location_name,
+        primary_poi_type=primary_poi_type,
+        created_day_part=created_day_part,
+        min_quality=min_quality,
     )
 
     return {
         "job_id": job_id,
         "query": query,
         "top_k": top_k,
+        "filters": {
+            "location_name": location_name,
+            "primary_poi_type": primary_poi_type,
+            "created_day_part": created_day_part,
+            "min_quality": min_quality,
+        },
         "results": results,
     }

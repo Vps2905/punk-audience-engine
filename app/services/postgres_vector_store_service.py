@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -68,6 +68,7 @@ def ensure_postgres_vector_schema() -> None:
                     created_day_part TEXT,
                     quality_score DOUBLE PRECISION,
                     embedding DOUBLE PRECISION[] NOT NULL,
+                    embedding_norm DOUBLE PRECISION NOT NULL,
                     metadata_json JSONB NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE(job_id, vector_index)
@@ -82,6 +83,50 @@ def ensure_postgres_vector_schema() -> None:
             )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audience_vectors_poi ON audience_vectors(primary_poi_type);"
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE audience_vectors
+                ADD COLUMN IF NOT EXISTS
+                embedding_norm DOUBLE PRECISION;
+                """
+            )
+            cur.execute(
+                """
+                UPDATE audience_vectors
+                SET embedding_norm = SQRT(
+                    (
+                        SELECT COALESCE(
+                            SUM(value * value),
+                            0.0
+                        )
+                        FROM unnest(embedding)
+                            AS value
+                    )
+                )
+                WHERE embedding_norm IS NULL;
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE audience_vectors
+                ALTER COLUMN embedding_norm
+                SET NOT NULL;
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_audience_vectors_filter
+                ON audience_vectors(
+                    job_id,
+                    location_name,
+                    primary_poi_type,
+                    created_day_part,
+                    quality_score
+                );
+                """
             )
 
 
@@ -113,6 +158,7 @@ def save_postgres_vector_store(
                 item.get("created_day_part"),
                 float(item.get("quality_score", 0) or 0),
                 [float(x) for x in vectors[idx].tolist()],
+                float(np.linalg.norm(vectors[idx])),
                 Json(safe_item),
             )
         )
@@ -222,28 +268,220 @@ def postgres_similarity_search(
     job_id: str,
     query_vector: np.ndarray,
     top_k: int = 5,
+    *,
+    location_name: Optional[str] = None,
+    primary_poi_type: Optional[str] = None,
+    created_day_part: Optional[str] = None,
+    min_quality: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    store = load_postgres_vector_store(job_id)
-    vectors = np.asarray(store["vectors"], dtype=float)
-    metadata = store["metadata"]
+    """
+    Rank audience vectors inside PostgreSQL using cosine
+    similarity over DOUBLE PRECISION[] embeddings.
 
-    if vectors.size == 0:
-        return []
+    Only the requested top-k metadata records are returned
+    to the application.
+    """
+    clean_job_id = str(job_id or "").strip()
 
-    query = np.asarray(query_vector, dtype=float)
-    query_norm = np.linalg.norm(query)
-    vector_norms = np.linalg.norm(vectors, axis=1)
+    if not clean_job_id:
+        raise ValueError("job_id cannot be empty.")
 
-    denominator = vector_norms * query_norm
-    denominator[denominator == 0] = 1e-12
+    query = np.asarray(
+        query_vector,
+        dtype=float,
+    )
 
-    scores = (vectors @ query) / denominator
-    ranked_indices = np.argsort(scores)[::-1][:top_k]
+    if query.ndim != 1:
+        raise ValueError(
+            "query_vector must be one-dimensional."
+        )
 
-    results = []
-    for idx in ranked_indices:
-        item = dict(metadata[int(idx)])
-        item["similarity_score"] = float(scores[int(idx)])
+    if query.size == 0:
+        raise ValueError(
+            "query_vector cannot be empty."
+        )
+
+    if not np.isfinite(query).all():
+        raise ValueError(
+            "query_vector contains non-finite values."
+        )
+
+    query_dimension = int(query.shape[0])
+    query_norm = float(np.linalg.norm(query))
+
+    if query_norm <= 0:
+        raise ValueError(
+            "query_vector must have a non-zero norm."
+        )
+
+    top_k = max(
+        1,
+        min(int(top_k), 200),
+    )
+
+    ensure_postgres_vector_schema()
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    model_info,
+                    vector_dimension,
+                    vector_count
+                FROM audience_vector_models
+                WHERE job_id = %s;
+                """,
+                (clean_job_id,),
+            )
+
+            model_row = cur.fetchone()
+
+            if not model_row:
+                raise FileNotFoundError(
+                    "Postgres vector model not found "
+                    f"for job_id={clean_job_id}"
+                )
+
+            stored_dimension = int(
+                model_row[1] or 0
+            )
+
+            if stored_dimension != query_dimension:
+                raise ValueError(
+                    "Query vector dimension mismatch. "
+                    f"Expected {stored_dimension}, "
+                    f"received {query_dimension}."
+                )
+
+            where = [
+                "av.job_id = %(job_id)s",
+                (
+                    "cardinality(av.embedding) = "
+                    "%(query_dimension)s"
+                ),
+            ]
+
+            params: Dict[str, Any] = {
+                "job_id": clean_job_id,
+                "query_vector": [
+                    float(value)
+                    for value in query.tolist()
+                ],
+                "query_dimension": query_dimension,
+                "query_norm": query_norm,
+                "top_k": top_k,
+            }
+
+            if location_name:
+                where.append(
+                    "LOWER(av.location_name) = "
+                    "LOWER(%(location_name)s)"
+                )
+                params["location_name"] = str(
+                    location_name
+                ).strip()
+
+            if primary_poi_type:
+                where.append(
+                    "LOWER(av.primary_poi_type) = "
+                    "LOWER(%(primary_poi_type)s)"
+                )
+                params["primary_poi_type"] = str(
+                    primary_poi_type
+                ).strip()
+
+            if created_day_part:
+                where.append(
+                    "LOWER(av.created_day_part) = "
+                    "LOWER(%(created_day_part)s)"
+                )
+                params["created_day_part"] = str(
+                    created_day_part
+                ).strip()
+
+            if min_quality is not None:
+                params["min_quality"] = max(
+                    0.0,
+                    min(float(min_quality), 1.0),
+                )
+                where.append(
+                    "COALESCE(av.quality_score, 0) "
+                    ">= %(min_quality)s"
+                )
+
+            where_sql = " AND ".join(where)
+
+            cur.execute(
+                f"""
+                WITH scored AS (
+                    SELECT
+                        av.vector_index,
+                        av.metadata_json,
+                        CASE
+                            WHEN
+                                av.embedding_norm <= 0
+                                OR %(query_norm)s <= 0
+                            THEN 0.0
+                            ELSE (
+                                SELECT COALESCE(
+                                    SUM(
+                                        stored.value
+                                        * requested.value
+                                    ),
+                                    0.0
+                                )
+                                FROM unnest(av.embedding)
+                                    WITH ORDINALITY
+                                    AS stored(
+                                        value,
+                                        position
+                                    )
+                                JOIN unnest(
+                                    %(query_vector)s
+                                    ::DOUBLE PRECISION[]
+                                )
+                                    WITH ORDINALITY
+                                    AS requested(
+                                        value,
+                                        position
+                                    )
+                                USING (position)
+                            ) / NULLIF(
+                                av.embedding_norm
+                                * %(query_norm)s,
+                                0.0
+                            )
+                        END AS similarity_score
+                    FROM audience_vectors av
+                    WHERE {where_sql}
+                )
+                SELECT
+                    metadata_json,
+                    similarity_score,
+                    vector_index
+                FROM scored
+                ORDER BY
+                    similarity_score DESC,
+                    vector_index ASC
+                LIMIT %(top_k)s;
+                """,
+                params,
+            )
+
+            rows = cur.fetchall()
+
+    results: List[Dict[str, Any]] = []
+
+    for metadata, score, vector_index in rows:
+        item = dict(metadata or {})
+        item.setdefault(
+            "vector_index",
+            int(vector_index),
+        )
+        item["similarity_score"] = float(
+            score or 0.0
+        )
         results.append(item)
 
     return results
