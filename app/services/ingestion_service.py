@@ -8,18 +8,26 @@ from fastapi import UploadFile
 
 from app.services.privacy_service import apply_privacy_pipeline
 from app.services.lineage_service import write_lineage
+from app.core.production_guardrails import (
+    require_local_file_storage_allowed,
+)
 
 
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
 
-RAW_DIR.mkdir(parents=True, exist_ok=True)
-PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 JOB_STATUS = {}
 
 
 def ingest_csv(file: UploadFile, k_min: int = 1000, epsilon: float = 1.0) -> Dict[str, Any]:
+    require_local_file_storage_allowed(
+        "legacy CSV ingestion"
+    )
+
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
     job_id = f"job_{uuid4().hex[:12]}"
 
     JOB_STATUS[job_id] = {

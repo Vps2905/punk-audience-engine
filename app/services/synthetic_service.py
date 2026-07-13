@@ -7,10 +7,13 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
+from app.core.production_guardrails import (
+    require_local_file_storage_allowed,
+)
+
 
 PROCESSED_DIR = Path("data/processed")
 SYNTHETIC_DIR = Path("data/synthetic")
-SYNTHETIC_DIR.mkdir(parents=True, exist_ok=True)
 
 
 UNSAFE_KEYWORDS = [
@@ -224,6 +227,10 @@ def generate_synthetic_for_job(
     - no unsafe source/output columns
     - aggregate synthetic seed profiles only
     """
+    require_local_file_storage_allowed(
+        "legacy synthetic generation"
+    )
+
     _validate_generation_request(
         num_rows=num_rows,
         use_sdv=use_sdv,

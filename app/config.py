@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from app.core import production_guardrails
+
 
 class Settings:
     APP_NAME = "Audience Intelligence Engine"
@@ -21,7 +23,19 @@ class Settings:
 settings = Settings()
 
 
-def ensure_data_dirs():
+def ensure_data_dirs() -> list[str]:
+    """
+    Create legacy local-storage directories only when local file storage
+    is explicitly allowed.
+
+    Production deployments use Postgres-backed persistence and must not
+    create local runtime data directories during application startup.
+    """
+    if not production_guardrails.local_file_storage_allowed():
+        return []
+
+    created: list[str] = []
+
     for directory in [
         settings.RAW_DIR,
         settings.PROCESSED_DIR,
@@ -32,3 +46,6 @@ def ensure_data_dirs():
         settings.LINEAGE_DIR,
     ]:
         directory.mkdir(parents=True, exist_ok=True)
+        created.append(str(directory))
+
+    return created

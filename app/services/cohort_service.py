@@ -8,10 +8,12 @@ import pandas as pd
 
 from app.services.embedding_service import search_similar_audiences
 from app.services.vector_store_service import load_vector_store
+from app.core.production_guardrails import (
+    require_local_file_storage_allowed,
+)
 
 
 COHORT_DIR = Path("data/cohorts")
-COHORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def cohort_path(cohort_id: str) -> Path:
@@ -163,6 +165,10 @@ def create_cohort(
     - semantic query using vector search
     - metadata filters
     """
+    require_local_file_storage_allowed(
+        "legacy cohort creation"
+    )
+
     cohort_id = f"cohort_{uuid4().hex[:12]}"
     matched_records: List[Dict[str, Any]] = []
 
@@ -215,6 +221,7 @@ def create_cohort(
         "records": safe_records
     }
 
+    COHORT_DIR.mkdir(parents=True, exist_ok=True)
     path = cohort_path(cohort_id)
 
     with open(path, "w", encoding="utf-8") as f:
@@ -238,6 +245,10 @@ def get_cohort(cohort_id: str) -> Dict[str, Any]:
     """
     Reads saved cohort.
     """
+    require_local_file_storage_allowed(
+        "legacy cohort lookup"
+    )
+
     path = cohort_path(cohort_id)
 
     if not path.exists():

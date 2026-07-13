@@ -6,10 +6,12 @@ from datetime import datetime
 
 from app.services.cohort_service import get_cohort, remove_unsafe_fields, calculate_quality_score, extract_aggregated_traits
 from app.services.embedding_service import search_similar_audiences
+from app.core.production_guardrails import (
+    require_local_file_storage_allowed,
+)
 
 
 LOOKALIKE_DIR = Path("data/cohorts")
-LOOKALIKE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def build_lookalike_query(cohort: Dict[str, Any]) -> str:
@@ -36,6 +38,10 @@ def create_lookalike(
     """
     Creates lookalike audience from existing cohort.
     """
+    require_local_file_storage_allowed(
+        "legacy lookalike creation"
+    )
+
     source_cohort = get_cohort(cohort_id)
 
     if source_cohort.get("status") == "not_found":
@@ -59,6 +65,8 @@ def create_lookalike(
     aggregated_traits = extract_aggregated_traits(safe_records)
 
     lookalike_id = f"lookalike_{uuid4().hex[:12]}"
+
+    LOOKALIKE_DIR.mkdir(parents=True, exist_ok=True)
     output_path = LOOKALIKE_DIR / f"{lookalike_id}.json"
 
     lookalike_doc = {
