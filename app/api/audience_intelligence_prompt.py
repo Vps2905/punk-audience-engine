@@ -53,10 +53,38 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     )
     lines.append(f"Source rows checked: {source_rows_checked}")
     lines.append(f"Prompt-selected cohorts: {result.get('prompt_selected_cohorts')}")
-    lines.append(f"Exported audiences: {result.get('safe_export', {}).get('exported_cohorts')}")
-    lines.append(f"Lookalike pairs: {result.get('safe_export', {}).get('exported_lookalike_pairs')}")
-    lines.append(f"Approval status: {result.get('safe_export', {}).get('approval_status')}")
-    lines.append(f"Downstream export enabled: {result.get('safe_export', {}).get('downstream_export_enabled')}")
+    safe_export = result.get("safe_export", {}) or {}
+    audience_count = int(
+        safe_export.get("exported_cohorts") or 0
+    )
+    downstream_enabled = bool(
+        safe_export.get(
+            "downstream_export_enabled"
+        )
+    )
+
+    audience_count_label = (
+        "Delivered audiences"
+        if downstream_enabled
+        else "Prepared audience candidates"
+    )
+
+    lines.append(
+        f"{audience_count_label}: "
+        f"{audience_count}"
+    )
+    lines.append(
+        "Lookalike pairs: "
+        f"{safe_export.get('exported_lookalike_pairs')}"
+    )
+    lines.append(
+        "Approval status: "
+        f"{safe_export.get('approval_status')}"
+    )
+    lines.append(
+        "Downstream export enabled: "
+        f"{safe_export.get('downstream_export_enabled')}"
+    )
     lines.append("")
 
     filter_report = result.get("prompt_filter_report", {})
@@ -159,7 +187,18 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     else:
         lines.append("## Created approval-gated audiences")
         lines.append("")
-        lines.append("No approval-gated audience file was created for this run.")
+
+        if audience_count > 0:
+            lines.append(
+                "No local audience file was created. "
+                "Approval-gated candidates are stored in "
+                "Postgres run history."
+            )
+        else:
+            lines.append(
+                "No audience candidate was created for this run."
+            )
+
         lines.append("")
 
     privacy = result.get("privacy_guarantees", {})
@@ -175,19 +214,56 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     lines.append("")
 
     safe_export = result.get("safe_export", {}) or {}
-    freshness_status = ((result.get("v2_autonomous") or {}).get("data_freshness") or {}).get("freshness_status")
-    downstream_enabled = bool(safe_export.get("downstream_export_enabled"))
+    freshness_status = (
+        (
+            (result.get("v2_autonomous") or {}).get(
+                "data_freshness"
+            )
+            or {}
+        ).get("freshness_status")
+    )
+    downstream_enabled = bool(
+        safe_export.get("downstream_export_enabled")
+    )
+    approval_status = str(
+        safe_export.get("approval_status") or ""
+    )
 
-    if not downstream_enabled and str(freshness_status).lower() == "stale":
+    if approval_status == "blocked_no_safe_exact_match":
         lines.append(
-            "Export package is reviewable, but downstream delivery is blocked because source data is stale and manual approval is required."
+            "No audience candidate was created because no exact "
+            "privacy-safe cohort matched the requested location, "
+            "category, and daypart."
+        )
+    elif approval_status == "blocked_v2_failure":
+        lines.append(
+            "No audience candidate was approved because the "
+            "Autonomous Audience Intelligence v2 stage failed. "
+            "Downstream delivery remains blocked."
+        )
+    elif audience_count == 0:
+        lines.append(
+            "No audience candidate was created for this run."
+        )
+    elif (
+        not downstream_enabled
+        and str(freshness_status).lower() == "stale"
+    ):
+        lines.append(
+            "The prepared audience candidate is reviewable, but "
+            "downstream delivery is blocked because source data is "
+            "stale and manual approval is required."
         )
     elif not downstream_enabled:
         lines.append(
-            "Export package is reviewable, but downstream delivery is blocked until safety checks and manual approval pass."
+            "The prepared audience candidate is reviewable, but "
+            "downstream delivery is blocked until safety checks and "
+            "manual approval pass."
         )
     else:
-        lines.append("Export package is approved for downstream delivery.")
+        lines.append(
+            "The audience is approved for downstream delivery."
+        )
 
     lines.append("")
     lines.append(f"Run folder: {result.get('run_dir')}")
@@ -422,6 +498,11 @@ def audience_prompt_ui() -> str:
         const mutation = v2.mutation || {};
         const freshness = v2.data_freshness || {};
         const review = data.v2_swarm_review || {};
+        const coverageWarnings = Array.from(new Set([
+          ...(data.coverage_warnings || []),
+          ...(review.coverage_warnings || []),
+          ...(v2.coverage_warnings || [])
+        ].filter(Boolean)));
 
         const v2Summary = [
           "===== Autonomous Audience Intelligence v2 =====",
@@ -440,7 +521,7 @@ def audience_prompt_ui() -> str:
           "Data gaps: " + (review.data_gap_count ?? "unknown"),
           "",
           "Coverage warnings:",
-          ...(v2.coverage_warnings || []).map(w => "- " + w),
+          ...coverageWarnings.map(w => "- " + w),
           "",
           "===== Business Summary =====",
           ""

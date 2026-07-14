@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -89,9 +90,27 @@ class AutonomousAudienceIntelligenceV2Service:
                 "persist_artifacts"
             ] = persist_artifacts
 
-        embedding_manifest = embedding_service.build_index(
-            **embedding_kwargs
-        )
+        embedding_manifest = None
+        embedding_attempts = 3
+
+        for attempt in range(1, embedding_attempts + 1):
+            try:
+                embedding_manifest = embedding_service.build_index(
+                    **embedding_kwargs
+                )
+                break
+            except Exception as exc:
+                is_transient = self._is_transient_database_error(exc)
+
+                if not is_transient or attempt >= embedding_attempts:
+                    raise
+
+                time.sleep(0.25 * attempt)
+
+        if embedding_manifest is None:
+            raise RuntimeError(
+                "V2 embedding manifest was not created."
+            )
 
         ranked = DynamicAudienceRankingService().rank(
             safe_cohorts=safe_cohorts,
@@ -171,6 +190,29 @@ class AutonomousAudienceIntelligenceV2Service:
             )
 
         return summary
+
+    def _is_transient_database_error(
+        self,
+        exc: Exception,
+    ) -> bool:
+        message = str(exc or "").strip().lower()
+
+        transient_markers = (
+            "server closed the connection unexpectedly",
+            "connection reset by peer",
+            "connection already closed",
+            "connection is closed",
+            "connection not open",
+            "could not receive data from server",
+            "ssl syscall error",
+            "terminating connection",
+            "closed the connection",
+        )
+
+        return any(
+            marker in message
+            for marker in transient_markers
+        )
 
     def _build_coverage_warnings(
         self,

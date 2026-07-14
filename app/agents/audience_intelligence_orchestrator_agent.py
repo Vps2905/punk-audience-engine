@@ -192,9 +192,19 @@ class AudienceIntelligenceOrchestratorAgent:
         except Exception as exc:
             v2_result = {
                 "status": "failed",
+                "pipeline_version": "v2_autonomous_preview",
                 "error": str(exc),
+                "approval_status": "blocked_v2_failure",
+                "block_export": True,
                 "approval_required": True,
                 "downstream_export_enabled": False,
+                "coverage_warnings": [
+                    (
+                        "Autonomous Audience Intelligence v2 failed. "
+                        "Audience approval and downstream delivery are "
+                        "blocked until the V2 stage completes successfully."
+                    )
+                ],
             }
             print("V2 AUTONOMOUS STATUS: failed")
             print("V2 ERROR:", exc)
@@ -295,6 +305,10 @@ class AudienceIntelligenceOrchestratorAgent:
                 if _warning not in _coverage_warnings:
                     _coverage_warnings.append(_warning)
 
+            _no_match_swarm_review = self._build_no_match_swarm_review(
+                coverage_warnings=_coverage_warnings,
+            )
+
             _final_summary_path = _run_dir / "final_summary.md"
             _final_summary = "\n".join(
                 [
@@ -337,7 +351,7 @@ class AudienceIntelligenceOrchestratorAgent:
                     else final_summary_reference
                 ),
                 "v2_autonomous": locals().get("v2_result") or {},
-                "v2_swarm_review": locals().get("v2_swarm_review") or {},
+                "v2_swarm_review": _no_match_swarm_review,
                 "v2_guided_selection_report": _v2_guided_selection_report,
                 "safe_export": {
                     "approval_status": "blocked_no_safe_exact_match",
@@ -433,6 +447,10 @@ class AudienceIntelligenceOrchestratorAgent:
             export_result=export_result,
             freshness_guardrail=freshness_guardrail,
         )
+        export_result = self._apply_v2_failure_fail_closed(
+            export_result=export_result,
+            v2_result=v2_result,
+        )
 
         print("SAFE EXPORT STATUS:", export_result["status"])
         print("APPROVAL STATUS:", export_result["approval_status"])
@@ -446,6 +464,14 @@ class AudienceIntelligenceOrchestratorAgent:
             prompt_filter_report=prompt_filter_report,
             export_result=export_result,
         )
+
+        for warning in (
+            v2_result.get("coverage_warnings")
+            if isinstance(v2_result, dict)
+            else []
+        ) or []:
+            if warning not in coverage_warnings:
+                coverage_warnings.append(warning)
 
         if coverage_warnings:
             print("COVERAGE WARNINGS:")
@@ -703,6 +729,61 @@ class AudienceIntelligenceOrchestratorAgent:
                 else ""
             ),
         }
+
+    def _apply_v2_failure_fail_closed(
+        self,
+        *,
+        export_result: Dict[str, Any],
+        v2_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        result = self._safe_dict(export_result)
+        v2 = v2_result or {}
+
+        if str(v2.get("status") or "").lower() != "failed":
+            return result
+
+        blocked_status = "blocked_v2_failure"
+        result["status"] = "blocked"
+        result["approval_status"] = blocked_status
+        result["downstream_export_enabled"] = False
+        result["block_export"] = True
+        result["export_blocked"] = True
+        result["exported_cohorts"] = 0
+        result["exported_lookalike_pairs"] = 0
+        result["block_export_reason"] = (
+            "Autonomous Audience Intelligence v2 failed. "
+            "Approval and downstream delivery are blocked."
+        )
+        result["v2_failure"] = {
+            "status": "failed",
+            "error": str(v2.get("error") or ""),
+        }
+
+        package = result.get("package") or {}
+
+        for collection_name in ("cohorts", "lookalikes"):
+            for item in package.get(collection_name) or []:
+                if not isinstance(item, dict):
+                    continue
+
+                item["approval_status"] = blocked_status
+                item["export_status"] = blocked_status
+                item["allowed_destination"] = "none"
+                item["downstream_export_enabled"] = False
+
+        payload = package.get("payload") or {}
+        if isinstance(payload, dict):
+            payload["approval_status"] = blocked_status
+            payload["downstream_export_enabled"] = False
+            payload["exported_cohorts"] = 0
+
+        approval_request = package.get("approval_request") or {}
+        if isinstance(approval_request, dict):
+            approval_request["status"] = blocked_status
+            approval_request["approval_status"] = blocked_status
+
+        result["package"] = package
+        return result
 
     def _apply_freshness_fail_closed(
         self,
@@ -976,6 +1057,44 @@ class AudienceIntelligenceOrchestratorAgent:
         report["downstream_export_enabled"] = True
 
         return selected, report
+
+    def _build_no_match_swarm_review(
+        self,
+        *,
+        coverage_warnings: list[str],
+    ) -> Dict[str, Any]:
+        warnings = [
+            str(item)
+            for item in (coverage_warnings or [])
+            if str(item).strip()
+        ]
+
+        return {
+            "status": "completed",
+            "overall_review_status": "blocked",
+            "review_reason": "no_safe_exact_match",
+            "coverage_warning_count": len(warnings),
+            "coverage_warnings": warnings,
+            "data_gap_count": 0,
+            "approval_required": True,
+            "downstream_export_enabled": False,
+            "signals": [
+                {
+                    "name": "exact_safe_match",
+                    "status": "blocked",
+                    "reason": (
+                        "No exact privacy-safe cohort matched the "
+                        "requested location, category, and daypart."
+                    ),
+                }
+            ],
+            "recommendations": [
+                (
+                    "Clarify or correct the requested location, or wait "
+                    "until matching privacy-safe source coverage is available."
+                )
+            ],
+        }
 
     def _run_privacy_layer(
         self,
