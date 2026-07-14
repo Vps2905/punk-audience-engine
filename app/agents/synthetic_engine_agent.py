@@ -88,9 +88,15 @@ class SyntheticEngineAgent:
         production_mode: Optional[bool] = None,
         allow_fallback: Optional[bool] = None,
         run_id: Optional[str] = None,
+        persist_artifacts: bool = True,
     ) -> Dict[str, Any]:
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if persist_artifacts:
+            output_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
         run_id = run_id or f"synthetic_run_{uuid.uuid4().hex[:12]}"
         engine_requested = (engine_requested or self.config.synthetic_engine).strip().lower()
@@ -218,7 +224,11 @@ class SyntheticEngineAgent:
         manifest_json = output_dir / "synthetic_manifest.json"
         schema_json = output_dir / "synthetic_safe_input_schema.json"
 
-        synthetic_df.to_csv(synthetic_csv, index=False)
+        if persist_artifacts:
+            synthetic_df.to_csv(
+                synthetic_csv,
+                index=False,
+            )
 
         safe_input_schema = {
             "columns": {col: str(dtype) for col, dtype in safe_input.dtypes.items()},
@@ -228,7 +238,11 @@ class SyntheticEngineAgent:
             "raw_coordinates_present": False,
             "individual_rows_present": False,
         }
-        self._write_json(schema_json, safe_input_schema)
+        if persist_artifacts:
+            self._write_json(
+                schema_json,
+                safe_input_schema,
+            )
 
         privacy_budget_record = None
         if engine_used in self.DP_ENGINES:
@@ -255,7 +269,38 @@ class SyntheticEngineAgent:
                 "production_mode": production_mode,
                 "raw_identifiers_exported": False,
             },
+            persist_artifacts=persist_artifacts,
         )
+
+        if persist_artifacts:
+            outputs = {
+                "synthetic_csv": str(synthetic_csv),
+                "synthetic_manifest": str(manifest_json),
+                "safe_input_schema": str(schema_json),
+                "approval_request": str(
+                    output_dir / "approval_request.json"
+                ),
+            }
+            storage_backend = "local_files"
+        else:
+            base_uri = (
+                "postgres://audience_run_history.final_summary"
+                f"?run_id={run_id}"
+                "&section=synthetic"
+            )
+            outputs = {
+                "synthetic_csv": (
+                    base_uri + "&artifact=synthetic_summary"
+                ),
+                "synthetic_manifest": (
+                    base_uri + "&artifact=manifest"
+                ),
+                "safe_input_schema": (
+                    base_uri + "&artifact=input_schema"
+                ),
+                "approval_request": approval_request["artifact_uri"],
+            }
+            storage_backend = "run_history_jsonb"
 
         manifest = {
             "module": "Synthetic Data Generation",
@@ -281,15 +326,14 @@ class SyntheticEngineAgent:
             "raw_email_exported": False,
             "raw_phone_exported": False,
             "individual_user_data_exported": False,
-            "outputs": {
-                "synthetic_csv": str(synthetic_csv),
-                "synthetic_manifest": str(manifest_json),
-                "safe_input_schema": str(schema_json),
-                "approval_request": str(output_dir / "approval_request.json"),
-            },
+            "storage_backend": storage_backend,
+            "outputs": outputs,
+            "approval_request": self._json_safe(approval_request),
+            "safe_input_schema": self._json_safe(safe_input_schema),
         }
 
-        self._write_json(manifest_json, manifest)
+        if persist_artifacts:
+            self._write_json(manifest_json, manifest)
 
         self.audit_logger.log(
             "synthetic_generation_completed",

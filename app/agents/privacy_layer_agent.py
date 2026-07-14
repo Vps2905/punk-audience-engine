@@ -142,9 +142,15 @@ class PrivacyLayerAgent:
         epsilon: Optional[float] = None,
         run_id: Optional[str] = None,
         hash_secret: Optional[str] = None,
+        persist_artifacts: bool = True,
     ) -> Dict[str, Any]:
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if persist_artifacts:
+            output_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
         run_id = run_id or f"privacy_run_{uuid.uuid4().hex[:12]}"
         grouping_columns = grouping_columns or self.DEFAULT_GROUPING_COLUMNS
@@ -200,7 +206,11 @@ class PrivacyLayerAgent:
         lineage_report_path = output_dir / "lineage_report.json"
         schema_report_path = output_dir / "privacy_input_schema.json"
 
-        safe_df.to_csv(clean_feature_path, index=False)
+        if persist_artifacts:
+            safe_df.to_csv(
+                clean_feature_path,
+                index=False,
+            )
 
         budget_record = self.ledger.record_spend(
             run_id=run_id,
@@ -249,11 +259,50 @@ class PrivacyLayerAgent:
                 "individual_user_data_exported": False,
                 "aggregated_only": True,
             },
-            "outputs": {
-                "clean_feature_table": str(clean_feature_path),
-                "privacy_report": str(privacy_report_path),
-                "lineage_report": str(lineage_report_path),
-                "input_schema": str(schema_report_path),
+            "storage_backend": (
+                "local_files"
+                if persist_artifacts
+                else "run_history_jsonb"
+            ),
+            "outputs": (
+                {
+                    "clean_feature_table": str(clean_feature_path),
+                    "privacy_report": str(privacy_report_path),
+                    "lineage_report": str(lineage_report_path),
+                    "input_schema": str(schema_report_path),
+                }
+                if persist_artifacts
+                else {
+                    "clean_feature_table": (
+                        "postgres://audience_run_history.final_summary"
+                        f"?run_id={run_id}"
+                        "&section=privacy"
+                        "&artifact=clean_feature_table"
+                    ),
+                    "privacy_report": (
+                        "postgres://audience_run_history.final_summary"
+                        f"?run_id={run_id}"
+                        "&section=privacy"
+                        "&artifact=privacy_report"
+                    ),
+                    "lineage_report": (
+                        "postgres://audience_run_history.final_summary"
+                        f"?run_id={run_id}"
+                        "&section=privacy"
+                        "&artifact=lineage_report"
+                    ),
+                    "input_schema": (
+                        "postgres://audience_run_history.final_summary"
+                        f"?run_id={run_id}"
+                        "&section=privacy"
+                        "&artifact=input_schema"
+                    ),
+                }
+            ),
+            "records": {
+                "safe_cohorts": self._json_safe(
+                    safe_df.to_dict(orient="records")
+                ),
             },
         }
 
@@ -299,9 +348,17 @@ class PrivacyLayerAgent:
             "output_is_aggregated_only": True,
         }
 
-        self._write_json(privacy_report_path, privacy_report)
-        self._write_json(lineage_report_path, lineage_report)
-        self._write_json(schema_report_path, schema_report)
+        privacy_report["records"]["lineage_report"] = self._json_safe(
+            lineage_report
+        )
+        privacy_report["records"]["input_schema"] = self._json_safe(
+            schema_report
+        )
+
+        if persist_artifacts:
+            self._write_json(privacy_report_path, privacy_report)
+            self._write_json(lineage_report_path, lineage_report)
+            self._write_json(schema_report_path, schema_report)
 
         self.audit_logger.log(
             "privacy_layer_completed",

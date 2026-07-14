@@ -18,20 +18,47 @@ class AutonomousV2SwarmReviewAgent:
     - approval safety
     """
 
-    def review_run(self, run_dir: str | Path) -> dict[str, Any]:
+    def review_run(
+        self,
+        run_dir: str | Path,
+    ) -> dict[str, Any]:
         run_path = Path(run_dir)
 
         final_summary_path = run_path / "final_prompt_summary.json"
-        v2_summary_path = run_path / "06_v2_autonomous_preview" / "v2_preview_summary.json"
-        output_path = run_path / "06_v2_autonomous_preview" / "v2_swarm_review.json"
+        v2_summary_path = (
+            run_path
+            / "06_v2_autonomous_preview"
+            / "v2_preview_summary.json"
+        )
+        output_path = (
+            run_path
+            / "06_v2_autonomous_preview"
+            / "v2_swarm_review.json"
+        )
 
         final_summary = self._read_json(final_summary_path)
-        v2 = final_summary.get("v2_autonomous") or self._read_json(v2_summary_path)
+        v2 = (
+            final_summary.get("v2_autonomous")
+            or self._read_json(v2_summary_path)
+        )
 
+        result = self.review_v2(
+            v2,
+            run_reference=str(run_path),
+        )
+        self._write_json(output_path, result)
+        return result
+
+    def review_v2(
+        self,
+        v2: dict[str, Any],
+        *,
+        run_reference: str | None = None,
+    ) -> dict[str, Any]:
         if not v2:
-            result = {
+            return {
                 "status": "missing_v2_output",
-                "run_dir": str(run_path),
+                "run_dir": run_reference,
                 "overall_review_status": "blocked",
                 "signals": [],
                 "recommendations": [
@@ -40,8 +67,6 @@ class AutonomousV2SwarmReviewAgent:
                 "approval_required": True,
                 "downstream_export_enabled": False,
             }
-            self._write_json(output_path, result)
-            return result
 
         freshness = v2.get("data_freshness") or {}
         embed = v2.get("embedding_manifest") or {}
@@ -50,7 +75,8 @@ class AutonomousV2SwarmReviewAgent:
         suggestions = mutation.get("mutation_suggestions") or []
 
         data_gap_count = sum(
-            1 for item in suggestions
+            1
+            for item in suggestions
             if str(item.get("mutation_type")) == "data_gap"
         )
 
@@ -64,29 +90,38 @@ class AutonomousV2SwarmReviewAgent:
 
         overall = self._overall_status(signals)
 
-        result = {
+        return {
             "status": "completed",
-            "run_dir": str(run_path),
+            "run_dir": run_reference,
             "overall_review_status": overall,
             "v2_status": v2.get("status"),
             "freshness_status": freshness.get("freshness_status"),
-            "latest_source_timestamp": freshness.get("latest_source_timestamp"),
-            "source_rows_checked": freshness.get("source_rows_checked"),
+            "latest_source_timestamp": freshness.get(
+                "latest_source_timestamp"
+            ),
+            "source_rows_checked": freshness.get(
+                "source_rows_checked"
+            ),
             "vector_count": embed.get("vector_count"),
             "vector_dimension": embed.get("vector_dimension"),
             "ranked_match_count": v2.get("ranked_match_count"),
             "coverage_warning_count": len(warnings),
             "coverage_warnings": warnings,
-            "mutation_suggestion_count": mutation.get("suggestion_count"),
+            "mutation_suggestion_count": mutation.get(
+                "suggestion_count"
+            ),
             "data_gap_count": data_gap_count,
-            "approval_required": v2.get("approval_required", True),
-            "downstream_export_enabled": v2.get("downstream_export_enabled", False),
+            "approval_required": v2.get(
+                "approval_required",
+                True,
+            ),
+            "downstream_export_enabled": v2.get(
+                "downstream_export_enabled",
+                False,
+            ),
             "signals": signals,
             "recommendations": self._recommendations(signals),
         }
-
-        self._write_json(output_path, result)
-        return result
 
     def _freshness_signal(self, freshness: dict[str, Any]) -> dict[str, Any]:
         status = str(freshness.get("freshness_status", "unknown")).lower()

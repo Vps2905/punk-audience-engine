@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from sqlalchemy import create_engine, text
 from app.services.privacy_budget_ledger_service import PrivacyBudgetLedgerService, PrivacyBudgetRequest
+from app.core.production_guardrails import local_file_storage_allowed
 
 
 class AudienceRunHistoryService:
@@ -1986,6 +1987,12 @@ class AudienceRunHistoryService:
             clean_item[
                 "_normalized_approval_status"
             ] = authoritative_approval
+            clean_item["approval_status"] = authoritative_approval
+            clean_item["export_status"] = authoritative_approval
+
+            if authoritative_approval.startswith("blocked_"):
+                clean_item["allowed_destination"] = "none"
+                clean_item["downstream_export_enabled"] = False
 
             existing = deduplicated.get(
                 export_cohort_id
@@ -2113,7 +2120,13 @@ class AudienceRunHistoryService:
         outputs = safe_export.get("outputs") or {}
 
         for artifact_type, artifact_path in outputs.items():
-            if artifact_path:
+            if (
+                artifact_path
+                and (
+                    "://" in str(artifact_path)
+                    or local_file_storage_allowed()
+                )
+            ):
                 rows.append(
                     {
                         "run_id": run_id,

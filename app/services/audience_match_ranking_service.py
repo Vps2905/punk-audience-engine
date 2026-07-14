@@ -20,6 +20,25 @@ class DynamicAudienceRankingService:
     - privacy status
     """
 
+    CATEGORY_ALIASES = {
+        "cafe": {
+            "cafe",
+            "coffee",
+            "coffee_shop",
+            "coffeehouse",
+            "espresso_bar",
+        },
+        "restaurant": {
+            "restaurant",
+            "food_service",
+        },
+        "gym": {
+            "gym",
+            "fitness_center",
+            "health_club",
+        },
+    }
+
     CATEGORY_NEIGHBORS = {
         "restaurant": {
             "restaurant",
@@ -30,7 +49,11 @@ class DynamicAudienceRankingService:
             "takeaway",
             "cafe",
         },
-        "cafe": {"cafe", "coffee", "restaurant", "bakery"},
+        "cafe": {
+            "restaurant",
+            "bakery",
+            "dessert_shop",
+        },
         "gym": {"gym", "fitness", "health_club", "yoga", "pilates"},
         "office": {
             "office",
@@ -84,12 +107,20 @@ class DynamicAudienceRankingService:
         freshness_score = self._freshness_score(freshness)
         privacy_score = 1.0 if str(row.get("privacy_status", "passed")).lower() == "passed" else 0.0
 
-        exact = location_score >= 0.95 and category_score >= 0.9 and daypart_score >= 0.9
+        exact = (
+            location_score >= 0.95
+            and category_score >= 0.99
+            and daypart_score >= 0.9
+        )
 
         if exact:
             match_type = "exact_match"
             fallback_penalty = 0.0
-        elif location_score >= 0.7 and category_score >= 0.9 and daypart_score < 0.9:
+        elif (
+            location_score >= 0.7
+            and category_score >= 0.99
+            and daypart_score < 0.9
+        ):
             match_type = "broader_daypart"
             fallback_penalty = 0.12
         elif location_score >= 0.7 and category_score >= 0.5:
@@ -141,28 +172,84 @@ class DynamicAudienceRankingService:
             return 0.7
         if loc in requested:
             return 1.0
-        if any(req in loc or loc in req for req in requested):
-            return 0.8
+        if any(
+            req in loc or loc in req
+            for req in requested
+        ):
+            return 0.95
         return 0.0
 
-    def _category_score(self, row: pd.Series, intent: dict[str, Any]) -> float:
-        requested = [str(x).lower() for x in intent.get("canonical_categories", [])]
-        poi = str(row.get("primary_poi_type", "")).lower().replace(" ", "_")
+    def _category_score(
+        self,
+        row: pd.Series,
+        intent: dict[str, Any],
+    ) -> float:
+        requested = [
+            self._normalize_category(value)
+            for value in intent.get(
+                "canonical_categories",
+                [],
+            )
+        ]
+        poi = self._normalize_category(
+            row.get("primary_poi_type", "")
+        )
 
         if not requested:
             return 0.7
 
-        for req in requested:
-            neighbors = self.CATEGORY_NEIGHBORS.get(req, {req})
+        for raw_request in requested:
+            request = self._canonical_category(raw_request)
+            aliases = self.CATEGORY_ALIASES.get(
+                request,
+                {request},
+            )
 
-            if poi == req:
+            if poi in aliases:
                 return 1.0
+
+            neighbors = (
+                self.CATEGORY_NEIGHBORS.get(
+                    request,
+                    set(),
+                )
+                - aliases
+            )
+
             if poi in neighbors:
-                return 0.9
-            if any(n in poi or poi in n for n in neighbors):
                 return 0.75
 
+            if any(
+                neighbor in poi or poi in neighbor
+                for neighbor in neighbors
+            ):
+                return 0.6
+
         return 0.0
+
+    def _normalize_category(
+        self,
+        value: Any,
+    ) -> str:
+        return (
+            str(value or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+
+    def _canonical_category(
+        self,
+        value: str,
+    ) -> str:
+        normalized = self._normalize_category(value)
+
+        for canonical, aliases in self.CATEGORY_ALIASES.items():
+            if normalized in aliases:
+                return canonical
+
+        return normalized
 
     def _daypart_score(self, row: pd.Series, intent: dict[str, Any]) -> float:
         requested = [str(x).lower() for x in intent.get("dayparts", [])]

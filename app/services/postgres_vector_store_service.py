@@ -342,6 +342,7 @@ def save_postgres_vector_store(
                     created_day_part,
                     quality_score,
                     embedding,
+                    embedding_norm,
                     metadata_json
                 )
                 VALUES %s

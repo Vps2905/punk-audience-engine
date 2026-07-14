@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -35,9 +36,15 @@ class AutonomousAudienceIntelligenceV2Service:
         output_dir: str | Path,
         previous_freshness_report_path: str | Path | None = None,
         freshness_source_df: pd.DataFrame | None = None,
+        persist_artifacts: bool = True,
     ) -> dict[str, Any]:
         output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+
+        if persist_artifacts:
+            output_path.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
         if safe_cohorts is None or safe_cohorts.empty:
             raise ValueError("safe_cohorts is empty. Cannot run v2 intelligence.")
@@ -46,16 +53,44 @@ class AutonomousAudienceIntelligenceV2Service:
 
         freshness = DataFreshnessAgent().analyze_dataframe(
             df=freshness_df,
-            run_dir=output_path,
+            run_dir=(
+                output_path
+                if persist_artifacts
+                else None
+            ),
             previous_report_path=previous_freshness_report_path,
         )
 
-        prompt_intent = HybridSemanticIntentAgent().resolve(prompt=prompt, safe_cohorts=safe_cohorts, output_dir=output_dir)
-
-        embedding_manifest = AllSafeCohortEmbeddingService().build_index(
+        prompt_intent = HybridSemanticIntentAgent().resolve(
+            prompt=prompt,
             safe_cohorts=safe_cohorts,
-            output_dir=output_path / "embeddings",
-            job_id=f"v2_all_safe_{output_path.parent.name}_{output_path.name}",
+            output_dir=(
+                output_dir
+                if persist_artifacts
+                else None
+            ),
+        )
+
+        embedding_service = AllSafeCohortEmbeddingService()
+        embedding_kwargs = {
+            "safe_cohorts": safe_cohorts,
+            "output_dir": output_path / "embeddings",
+            "job_id": (
+                f"v2_all_safe_"
+                f"{output_path.parent.name}_"
+                f"{output_path.name}"
+            ),
+        }
+
+        if "persist_artifacts" in inspect.signature(
+            embedding_service.build_index
+        ).parameters:
+            embedding_kwargs[
+                "persist_artifacts"
+            ] = persist_artifacts
+
+        embedding_manifest = embedding_service.build_index(
+            **embedding_kwargs
         )
 
         ranked = DynamicAudienceRankingService().rank(
@@ -64,8 +99,28 @@ class AutonomousAudienceIntelligenceV2Service:
             freshness_report=freshness,
         )
 
-        ranked_path = output_path / "ranked_audience_matches.csv"
-        ranked.to_csv(ranked_path, index=False)
+        ranked_records = ranked.to_dict(
+            orient="records"
+        )
+        ranked_path = (
+            str(
+                output_path
+                / "ranked_audience_matches.csv"
+            )
+            if persist_artifacts
+            else (
+                "postgres://audience_run_history.final_summary"
+                f"?run_id={output_path.parent.name}"
+                "&section=v2"
+                "&artifact=ranked_matches"
+            )
+        )
+
+        if persist_artifacts:
+            ranked.to_csv(
+                ranked_path,
+                index=False,
+            )
 
         coverage_warnings = self._build_coverage_warnings(prompt_intent, ranked)
 
@@ -73,7 +128,11 @@ class AutonomousAudienceIntelligenceV2Service:
             prompt_intent=prompt_intent,
             ranked_cohorts=ranked,
             coverage_warnings=coverage_warnings,
-            run_dir=output_path,
+            run_dir=(
+                output_path
+                if persist_artifacts
+                else None
+            ),
         )
 
         summary = {
@@ -85,7 +144,10 @@ class AutonomousAudienceIntelligenceV2Service:
             "embedding_manifest": embedding_manifest,
             "ranked_match_count": int(len(ranked)),
             "ranked_matches_path": str(ranked_path),
-            "top_ranked_matches": ranked.head(10).to_dict(orient="records"),
+            "ranked_matches": ranked_records,
+            "top_ranked_matches": ranked.head(10).to_dict(
+                orient="records"
+            ),
             "coverage_warnings": coverage_warnings,
             "mutation": mutation,
             "approval_required": True,
@@ -97,11 +159,16 @@ class AutonomousAudienceIntelligenceV2Service:
             ),
         }
 
-        summary_path = output_path / "v2_preview_summary.json"
-        summary_path.write_text(
-            json.dumps(summary, indent=2, default=str),
-            encoding="utf-8",
-        )
+        if persist_artifacts:
+            summary_path = output_path / "v2_preview_summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    summary,
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
 
         return summary
 
@@ -136,7 +203,9 @@ class AutonomousAudienceIntelligenceV2Service:
             exact = loc_rows.copy()
 
             if requested_categories and "category_match_score" in exact.columns:
-                exact = exact[exact["category_match_score"] >= 0.9]
+                exact = exact[
+                    exact["category_match_score"] >= 0.99
+                ]
 
             if requested_dayparts and "daypart_match_score" in exact.columns:
                 exact = exact[exact["daypart_match_score"] >= 0.9]

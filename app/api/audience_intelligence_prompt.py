@@ -13,6 +13,7 @@ from app.agents.audience_intelligence_orchestrator_agent import AudienceIntellig
 from app.services.audience_run_history_service import AudienceRunHistoryService
 
 from app.core.api_key_auth import require_audience_api_key
+from app.core.production_guardrails import local_file_storage_allowed
 
 router = APIRouter(
     prefix="/api/audience-intelligence/prompt",
@@ -301,10 +302,25 @@ def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
 
         business_summary = _build_business_summary(result)
 
-        business_summary_path = Path(result["run_dir"]) / "business_prompt_summary.md"
-        business_summary_path.write_text(business_summary)
-
-        result["business_summary_path"] = str(business_summary_path)
+        if local_file_storage_allowed():
+            business_summary_path = (
+                Path(result["run_dir"])
+                / "business_prompt_summary.md"
+            )
+            business_summary_path.write_text(
+                business_summary,
+                encoding="utf-8",
+            )
+            result["business_summary_path"] = str(
+                business_summary_path
+            )
+        else:
+            business_summary_path = (
+                "postgres://audience_run_history.final_summary"
+                f"?run_id={result['run_id']}"
+                "&field=business_summary"
+            )
+            result["business_summary_path"] = business_summary_path
         result["business_summary"] = business_summary
 
         run_history = AudienceRunHistoryService().persist_run(final_summary=result)

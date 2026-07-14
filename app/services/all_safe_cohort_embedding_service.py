@@ -60,12 +60,18 @@ class AllSafeCohortEmbeddingService:
         safe_cohorts: pd.DataFrame,
         output_dir: str | Path,
         job_id: str | None = None,
+        persist_artifacts: bool = True,
     ) -> dict[str, Any]:
         if safe_cohorts is None or safe_cohorts.empty:
             raise ValueError("safe_cohorts is empty. Cannot build embedding index.")
 
         output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+
+        if persist_artifacts:
+            output_path.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
         cohort_df = safe_cohorts.copy().reset_index(drop=True)
         texts = cohort_df.apply(self._cohort_to_text, axis=1).tolist()
@@ -78,6 +84,13 @@ class AllSafeCohortEmbeddingService:
                 cohort_df=cohort_df,
                 output_path=output_path,
                 job_id=job_id,
+                persist_artifacts=persist_artifacts,
+            )
+
+        if not persist_artifacts:
+            raise RuntimeError(
+                "Local embedding storage is disabled. "
+                "Use a Postgres vector backend."
             )
 
         return self._build_local_index(
@@ -91,6 +104,7 @@ class AllSafeCohortEmbeddingService:
         cohort_df: pd.DataFrame,
         output_path: Path,
         job_id: str | None,
+        persist_artifacts: bool,
     ) -> dict[str, Any]:
         embedding_job_id = job_id or f"all_safe_{_slug(output_path.parent.name or output_path.name)}"
 
@@ -114,14 +128,27 @@ class AllSafeCohortEmbeddingService:
             "output_vectors": embed_result.get("vectors_path"),
             "output_metadata": embed_result.get("metadata_path"),
             "output_model": embed_result.get("model_path"),
-            "manifest_path": str(manifest_path),
+            "manifest_path": (
+                str(manifest_path)
+                if persist_artifacts
+                else (
+                    "postgres://audience_vector_models"
+                    f"?job_id={embedding_job_id}"
+                    "&artifact=manifest"
+                )
+            ),
             "privacy_note": (
                 "Embeddings are built only from privacy-safe cohort metadata. "
                 "No raw MAIDs, hashed IDs, raw lat/lng, email, phone, or individual rows are embedded."
             ),
         }
 
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        if persist_artifacts:
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2),
+                encoding="utf-8",
+            )
+
         return manifest
 
     def _build_local_index(

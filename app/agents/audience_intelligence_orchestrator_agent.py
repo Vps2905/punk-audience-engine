@@ -68,9 +68,31 @@ class AudienceIntelligenceOrchestratorAgent:
     ) -> Dict[str, Any]:
         run_id = self._build_run_id(prompt)
         run_dir = Path(output_root) / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
+        persist_artifacts = local_file_storage_allowed()
 
+        if persist_artifacts:
+            run_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+        run_reference = (
+            str(run_dir)
+            if persist_artifacts
+            else (
+                "postgres://audience_run_history"
+                f"?run_id={run_id}"
+            )
+        )
         final_summary_path = run_dir / "final_prompt_summary.json"
+        final_summary_reference = (
+            str(final_summary_path)
+            if persist_artifacts
+            else (
+                "postgres://audience_run_history.final_summary"
+                f"?run_id={run_id}"
+            )
+        )
 
         print("RUN ID:", run_id)
         print("PROMPT:", prompt)
@@ -110,12 +132,21 @@ class AudienceIntelligenceOrchestratorAgent:
                 run_id=f"{run_id}_privacy",
                 k_min=k_min,
                 epsilon=epsilon,
+                persist_artifacts=persist_artifacts,
             )
-            privacy_feature_path = self._resolve_privacy_feature_path(
-                privacy_result=privacy_result,
-                privacy_dir=privacy_dir,
-            )
-            privacy_cohorts = pd.read_csv(privacy_feature_path)
+
+            privacy_records = (
+                privacy_result.get("records") or {}
+            ).get("safe_cohorts")
+
+            if isinstance(privacy_records, list):
+                privacy_cohorts = pd.DataFrame(privacy_records)
+            else:
+                privacy_feature_path = self._resolve_privacy_feature_path(
+                    privacy_result=privacy_result,
+                    privacy_dir=privacy_dir,
+                )
+                privacy_cohorts = pd.read_csv(privacy_feature_path)
         else:
             privacy_dir.mkdir(parents=True, exist_ok=True)
             privacy_feature_path = privacy_dir / "clean_feature_table.csv"
@@ -132,7 +163,12 @@ class AudienceIntelligenceOrchestratorAgent:
         )
 
         selected_path = privacy_dir / "prompt_selected_cohorts.csv"
-        selected_cohorts.to_csv(selected_path, index=False)
+
+        if persist_artifacts:
+            selected_cohorts.to_csv(
+                selected_path,
+                index=False,
+            )
 
         print("PRIVACY COHORTS:", len(privacy_cohorts))
         print("PROMPT SELECTED COHORTS:", len(selected_cohorts))
@@ -145,6 +181,7 @@ class AudienceIntelligenceOrchestratorAgent:
                 safe_cohorts=privacy_cohorts,
                 output_dir=v2_dir,
                 freshness_source_df=safe_raw_input,
+                persist_artifacts=persist_artifacts,
             )
             print("V2 AUTONOMOUS STATUS:", v2_result.get("status"))
             print("V2 VECTOR COUNT:", v2_result.get("embedding_manifest", {}).get("vector_count"))
@@ -186,7 +223,12 @@ class AudienceIntelligenceOrchestratorAgent:
 
             if len(v2_selected_cohorts) >= 2:
                 selected_cohorts = v2_selected_cohorts
-                selected_cohorts.to_csv(selected_path, index=False)
+
+                if persist_artifacts:
+                    selected_cohorts.to_csv(
+                        selected_path,
+                        index=False,
+                    )
                 prompt_filter_report["v2_guided_selection"] = v2_guided_selection_report
 
                 print("V2 GUIDED SELECTION:", v2_guided_selection_report)
@@ -238,7 +280,12 @@ class AudienceIntelligenceOrchestratorAgent:
 
         if _block_export or _selected_empty:
             _run_dir = Path(str(locals().get("run_dir")))
-            _run_dir.mkdir(parents=True, exist_ok=True)
+
+            if persist_artifacts:
+                _run_dir.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
 
             _coverage_warnings = list(locals().get("coverage_warnings") or [])
             for _warning in (_prompt_filter_report.get("coverage_warnings") or []):
@@ -269,13 +316,14 @@ class AudienceIntelligenceOrchestratorAgent:
                     "",
                 ]
             )
-            _final_summary_path.write_text(_final_summary)
+            if persist_artifacts:
+                _final_summary_path.write_text(_final_summary)
 
             return {
                 "status": "completed",
                 "run_id": run_id,
                 "prompt": prompt,
-                "run_dir": str(_run_dir),
+                "run_dir": run_reference,
                 "source_mode": locals().get("source_mode"),
                 "source_rows": locals().get("source_rows"),
                 "source_columns": locals().get("source_columns"),
@@ -283,7 +331,11 @@ class AudienceIntelligenceOrchestratorAgent:
                 "prompt_selected_cohorts": 0,
                 "prompt_filter_report": _prompt_filter_report,
                 "coverage_warnings": _coverage_warnings,
-                "final_summary_path": str(_final_summary_path),
+                "final_summary_path": (
+                    str(_final_summary_path)
+                    if persist_artifacts
+                    else final_summary_reference
+                ),
                 "v2_autonomous": locals().get("v2_result") or {},
                 "v2_swarm_review": locals().get("v2_swarm_review") or {},
                 "v2_guided_selection_report": _v2_guided_selection_report,
@@ -322,6 +374,7 @@ class AudienceIntelligenceOrchestratorAgent:
                 "rows": synthetic_rows,
                 "epsilon": epsilon,
                 "k_min": k_min,
+                "persist_artifacts": persist_artifacts,
             },
         )
 
@@ -436,14 +489,29 @@ class AudienceIntelligenceOrchestratorAgent:
                 "approval_required": bool(approval_required),
                 "approval_status": export_result["approval_status"],
             },
-            "run_dir": str(run_dir),
-            "final_summary_path": str(final_summary_path),
+            "run_dir": run_reference,
+            "final_summary_path": final_summary_reference,
         }
 
-        final_summary_path.write_text(json.dumps(final_summary, indent=2, allow_nan=False))
+        if persist_artifacts:
+            final_summary_path.write_text(
+                json.dumps(
+                    final_summary,
+                    indent=2,
+                    allow_nan=False,
+                )
+            )
 
         try:
-            v2_swarm_review = AutonomousV2SwarmReviewAgent().review_run(run_dir)
+            review_agent = AutonomousV2SwarmReviewAgent()
+
+            if persist_artifacts:
+                v2_swarm_review = review_agent.review_run(run_dir)
+            else:
+                v2_swarm_review = review_agent.review_v2(
+                    v2_result,
+                    run_reference=run_reference,
+                )
         except Exception as exc:
             v2_swarm_review = {
                 "status": "failed",
@@ -453,11 +521,21 @@ class AudienceIntelligenceOrchestratorAgent:
                 "downstream_export_enabled": False,
             }
 
-        final_summary["v2_swarm_review"] = self._safe_dict(v2_swarm_review)
-        final_summary_path.write_text(json.dumps(final_summary, indent=2, allow_nan=False))
+        final_summary["v2_swarm_review"] = self._safe_dict(
+            v2_swarm_review
+        )
+
+        if persist_artifacts:
+            final_summary_path.write_text(
+                json.dumps(
+                    final_summary,
+                    indent=2,
+                    allow_nan=False,
+                )
+            )
 
         print("V2 SWARM REVIEW:", v2_swarm_review.get("overall_review_status"))
-        print("FINAL SUMMARY:", final_summary_path)
+        print("FINAL SUMMARY:", final_summary_reference)
         print("SAFE EXPORT:", export_result["outputs"]["safe_export_manifest"])
 
         return final_summary
@@ -647,7 +725,35 @@ class AudienceIntelligenceOrchestratorAgent:
         result["block_export"] = True
         result["export_blocked_until_source_refresh"] = True
         result["block_export_reason"] = freshness_guardrail.get("block_export_reason")
-        result["source_freshness"] = self._safe_dict(freshness_guardrail)
+        result["source_freshness"] = self._safe_dict(
+            freshness_guardrail
+        )
+
+        package = result.get("package") or {}
+
+        for collection_name in ("cohorts", "lookalikes"):
+            for item in package.get(collection_name) or []:
+                if not isinstance(item, dict):
+                    continue
+
+                item["approval_status"] = "blocked_stale_source"
+                item["export_status"] = "blocked_stale_source"
+                item["allowed_destination"] = "none"
+                item["downstream_export_enabled"] = False
+
+        payload = package.get("payload") or {}
+        if isinstance(payload, dict):
+            payload["approval_status"] = "blocked_stale_source"
+            payload["downstream_export_enabled"] = False
+
+        approval_request = package.get("approval_request") or {}
+        if isinstance(approval_request, dict):
+            approval_request["status"] = "blocked_stale_source"
+            approval_request["approval_status"] = (
+                "blocked_stale_source"
+            )
+
+        result["package"] = package
 
         outputs = result.get("outputs") or {}
         manifest_path = outputs.get("safe_export_manifest")
@@ -684,6 +790,7 @@ class AudienceIntelligenceOrchestratorAgent:
         v2_result = v2_result or {}
 
         ranked_path = v2_result.get("ranked_matches_path")
+        ranked_records = v2_result.get("ranked_matches")
         min_score = float(os.getenv("V2_EXPORT_MIN_MATCH_SCORE", "0.55"))
         strong_category_score = float(os.getenv("V2_EXPORT_MIN_CATEGORY_SCORE", "0.70"))
 
@@ -746,15 +853,24 @@ class AudienceIntelligenceOrchestratorAgent:
             "downstream_export_enabled": True,
         }
 
-        if not ranked_path:
-            return pd.DataFrame(), report
+        if isinstance(ranked_records, list):
+            ranked = pd.DataFrame(ranked_records)
+        else:
+            if not ranked_path:
+                return pd.DataFrame(), report
 
-        ranked_file = Path(ranked_path)
-        if not ranked_file.exists():
-            report["reason"] = "ranked_matches_path_missing"
-            return pd.DataFrame(), report
+            if str(ranked_path).startswith(
+                ("postgres://", "memory://")
+            ):
+                report["reason"] = "ranked_records_missing"
+                return pd.DataFrame(), report
 
-        ranked = pd.read_csv(ranked_file)
+            ranked_file = Path(ranked_path)
+            if not ranked_file.exists():
+                report["reason"] = "ranked_matches_path_missing"
+                return pd.DataFrame(), report
+
+            ranked = pd.read_csv(ranked_file)
         if ranked.empty:
             report["reason"] = "empty_ranked_matches"
             return pd.DataFrame(), report
@@ -869,8 +985,13 @@ class AudienceIntelligenceOrchestratorAgent:
         run_id: str,
         k_min: int,
         epsilon: float,
+        persist_artifacts: bool,
     ) -> Dict[str, Any]:
-        output_dir.mkdir(parents=True, exist_ok=True)
+        if persist_artifacts:
+            output_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
         agent = PrivacyLayerAgent()
 
@@ -893,6 +1014,7 @@ class AudienceIntelligenceOrchestratorAgent:
                 "poi_column": "primary_poi_type",
                 "k_min": k_min,
                 "epsilon": epsilon,
+                "persist_artifacts": persist_artifacts,
             },
         )
 
@@ -1398,16 +1520,34 @@ class AudienceIntelligenceOrchestratorAgent:
     ) -> list[str]:
         warnings: list[str] = []
 
-        outputs = export_result.get("outputs", {})
-        cohorts_path = outputs.get("safe_export_cohorts")
+        package = export_result.get("package") or {}
+        cohort_records = package.get("cohorts") or []
 
-        if not cohorts_path or not Path(cohorts_path).exists():
-            return ["Safe export cohorts file was not found, so coverage could not be verified."]
+        if isinstance(cohort_records, list) and cohort_records:
+            exported = pd.DataFrame(cohort_records)
+        else:
+            outputs = export_result.get("outputs") or {}
+            cohorts_path = outputs.get("safe_export_cohorts")
 
-        try:
-            exported = pd.read_csv(cohorts_path)
-        except Exception as exc:
-            return [f"Could not read safe export cohorts for coverage verification: {exc}"]
+            if (
+                not cohorts_path
+                or str(cohorts_path).startswith(
+                    ("postgres://", "memory://")
+                )
+                or not Path(cohorts_path).exists()
+            ):
+                return [
+                    "No safe export cohorts were available "
+                    "for coverage verification."
+                ]
+
+            try:
+                exported = pd.read_csv(cohorts_path)
+            except Exception as exc:
+                return [
+                    "Could not read safe export cohorts for "
+                    f"coverage verification: {exc}"
+                ]
 
         prompt_lower = prompt.lower().replace("café", "cafe").replace("cafés", "cafes")
         filter_mode = str(prompt_filter_report.get("filter_mode") or "")
