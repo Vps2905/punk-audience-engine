@@ -10,6 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.agents.audience_intelligence_orchestrator_agent import AudienceIntelligenceOrchestratorAgent
+from app.agents.audience_supervisor_agent import build_audience_execution_agent
 from app.core.audience_job_store import AudienceJobStore
 
 from app.core.api_key_auth import require_audience_api_key
@@ -22,6 +23,15 @@ router = APIRouter(
     tags=["Audience Intelligence Jobs"],
     dependencies=[Depends(require_audience_api_key)],
 )
+
+
+
+def _audience_execution_agent():
+    return build_audience_execution_agent(
+        orchestrator_factory=(
+            AudienceIntelligenceOrchestratorAgent
+        ),
+    )
 
 job_store = AudienceJobStore()
 
@@ -278,7 +288,7 @@ def _run_job_background(job_id: str) -> None:
             message="Running Audience Intelligence pipeline.",
         )
 
-        agent = AudienceIntelligenceOrchestratorAgent()
+        agent = _audience_execution_agent()
 
         result = agent.run(
             prompt=payload["prompt"],

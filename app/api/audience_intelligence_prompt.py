@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.agents.audience_intelligence_orchestrator_agent import AudienceIntelligenceOrchestratorAgent
+from app.agents.audience_supervisor_agent import build_audience_execution_agent
 from app.services.audience_run_history_service import AudienceRunHistoryService
 
 from app.core.api_key_auth import require_audience_api_key
@@ -19,6 +20,15 @@ router = APIRouter(
     prefix="/api/audience-intelligence/prompt",
     tags=["Audience Intelligence Prompt"],
 )
+
+
+
+def _audience_execution_agent():
+    return build_audience_execution_agent(
+        orchestrator_factory=(
+            AudienceIntelligenceOrchestratorAgent
+        ),
+    )
 
 
 class AudiencePromptRequest(BaseModel):
@@ -330,7 +340,7 @@ def _build_prompt_api_response(
         "outputs": safe_export.get("outputs", {}),
     }
 
-    return {
+    response = {
         "status": result.get("status"),
         "run_id": result.get("run_id"),
         "source_mode": result.get("source_mode"),
@@ -356,11 +366,38 @@ def _build_prompt_api_response(
         "run_history": result.get("run_history", {}),
     }
 
+    if result.get("supervisor_decision"):
+        response.update(
+            {
+                "supervisor_decision": result.get(
+                    "supervisor_decision"
+                ),
+                "supervisor_route": result.get(
+                    "supervisor_route"
+                ),
+                "supervisor_stage": result.get(
+                    "supervisor_stage"
+                ),
+                "supervisor_reason_codes": list(
+                    result.get(
+                        "supervisor_reason_codes"
+                    )
+                    or []
+                ),
+                "supervisor_trace": list(
+                    result.get("supervisor_trace")
+                    or []
+                ),
+            }
+        )
+
+    return response
+
 
 @router.post("/run", dependencies=[Depends(require_audience_api_key)])
 def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
     try:
-        agent = AudienceIntelligenceOrchestratorAgent()
+        agent = _audience_execution_agent()
 
         result = agent.run(
             prompt=request.prompt,

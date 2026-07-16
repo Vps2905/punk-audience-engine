@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Dict, Protocol
 
 from app.services.audience_supervisor_decision_service import (
@@ -12,6 +13,64 @@ class OrchestratorProtocol(Protocol):
 
 
 OrchestratorFactory = Callable[[], OrchestratorProtocol]
+
+
+_TRUE_FLAG_VALUES = {
+    "1",
+    "true",
+    "yes",
+    "on",
+    "enabled",
+}
+_FALSE_FLAG_VALUES = {
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+    "disabled",
+}
+
+
+def autonomous_supervisor_enabled(
+    value: Any | None = None,
+) -> bool:
+    # Unknown values preserve the existing orchestrator path. Once explicitly
+    # enabled, supervisor execution remains fail-closed.
+    raw = (
+        os.getenv(
+            "ENABLE_AUTONOMOUS_SUPERVISOR",
+            "false",
+        )
+        if value is None
+        else value
+    )
+    normalized = str(raw or "").strip().lower()
+
+    if normalized in _TRUE_FLAG_VALUES:
+        return True
+    if normalized in _FALSE_FLAG_VALUES:
+        return False
+
+    return False
+
+
+def build_audience_execution_agent(
+    *,
+    orchestrator_factory: OrchestratorFactory | None = None,
+) -> OrchestratorProtocol:
+    # Select the backward-compatible execution path for API entry points.
+    factory = (
+        orchestrator_factory
+        or _default_orchestrator_factory
+    )
+
+    if not autonomous_supervisor_enabled():
+        return factory()
+
+    return AudienceSupervisorAgent(
+        orchestrator_factory=factory,
+    )
 
 
 def _default_orchestrator_factory() -> OrchestratorProtocol:
