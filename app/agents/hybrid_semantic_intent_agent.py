@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.error
-import urllib.request
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -12,6 +11,11 @@ from typing import Any, Callable, Dict, Optional
 import pandas as pd
 
 from app.agents.semantic_prompt_intelligence_agent import SemanticPromptIntelligenceAgent
+from app.services.llm_model_router_service import (
+    LLMModelRouterError,
+    LLMModelRouterService,
+    LLMResponseValidationError,
+)
 
 
 LLMCallable = Callable[[list[dict[str, str]], dict[str, Any]], str]
@@ -60,6 +64,11 @@ class HybridSemanticIntentAgent:
 
         config = self._load_config()
         rag_context = self._build_safe_rag_context(safe_cohorts)
+        llm_rag_context = self._build_llm_rag_context(
+            prompt=prompt,
+            rag_context=rag_context,
+            max_context_items=config.max_context_items,
+        )
 
         if not config.enabled:
             result = self._with_hybrid_metadata(
@@ -69,16 +78,28 @@ class HybridSemanticIntentAgent:
                 resolver_mode="deterministic_fallback_llm_disabled",
                 llm_error=None,
             )
+            result = self._attach_llm_router_metadata(
+                result=result,
+                telemetry={
+                    "llm_attempted": False,
+                    "llm_used": False,
+                    "attempt_count": 0,
+                    "total_latency_ms": 0,
+                    "fallback_used": True,
+                    "fallback_reason": "llm_disabled",
+                    "attempts": [],
+                },
+            )
             self._write_result(result, output_dir)
             return result
 
         try:
-            llm_raw = self._call_llm(
+            routed = self._call_llm(
                 prompt=prompt,
-                rag_context=rag_context,
+                rag_context=llm_rag_context,
                 config=config,
             )
-            llm_json = self._parse_json_object(llm_raw)
+            llm_json = routed["validated"]
 
             result = self._validate_and_merge_llm_intent(
                 prompt=prompt,
@@ -87,7 +108,32 @@ class HybridSemanticIntentAgent:
                 rag_context=rag_context,
                 min_confidence=config.min_llm_confidence,
             )
+            result = self._attach_llm_router_metadata(
+                result=result,
+                telemetry=routed.get("telemetry") or {},
+            )
 
+            self._write_result(result, output_dir)
+            return result
+
+        except LLMModelRouterError as exc:
+            telemetry = exc.telemetry or {}
+            resolver_mode = self._fallback_resolver_mode(
+                telemetry
+            )
+            result = self._with_hybrid_metadata(
+                fallback,
+                rag_context=rag_context,
+                llm_used=False,
+                resolver_mode=resolver_mode,
+                llm_error=self._router_error_summary(
+                    telemetry
+                ),
+            )
+            result = self._attach_llm_router_metadata(
+                result=result,
+                telemetry=telemetry,
+            )
             self._write_result(result, output_dir)
             return result
 
@@ -98,6 +144,18 @@ class HybridSemanticIntentAgent:
                 llm_used=False,
                 resolver_mode="deterministic_fallback_llm_failed",
                 llm_error=str(exc),
+            )
+            result = self._attach_llm_router_metadata(
+                result=result,
+                telemetry={
+                    "llm_attempted": True,
+                    "llm_used": False,
+                    "attempt_count": 1,
+                    "total_latency_ms": 0,
+                    "fallback_used": True,
+                    "fallback_reason": "unhandled_llm_error",
+                    "attempts": [],
+                },
             )
             self._write_result(result, output_dir)
             return result
@@ -234,63 +292,299 @@ class HybridSemanticIntentAgent:
         }
 
 
+    def _build_llm_rag_context(
+        self,
+        *,
+        prompt: str,
+        rag_context: dict[str, Any],
+        max_context_items: int,
+    ) -> dict[str, Any]:
+        # Compact only the network payload. The full privacy-safe context
+        # remains available for deterministic validation after the LLM call.
+        limit = max(8, int(max_context_items or 20))
+        prompt_norm = self._match_norm(prompt)
+        prompt_terms = {
+            term
+            for term in prompt_norm.split("_")
+            if term
+        }
+
+        def score_text(value: Any) -> int:
+            normalized = self._match_norm(value)
+            if not normalized:
+                return 0
+
+            score = 0
+            if normalized in prompt_norm:
+                score += 20
+
+            value_terms = {
+                term
+                for term in normalized.split("_")
+                if term
+            }
+            score += len(
+                prompt_terms.intersection(value_terms)
+            ) * 3
+            return score
+
+        def compact_values(values: Any) -> list[str]:
+            items = [
+                str(item)
+                for item in (values or [])
+                if str(item).strip()
+            ]
+            ranked = sorted(
+                enumerate(items),
+                key=lambda pair: (
+                    -score_text(pair[1]),
+                    pair[0],
+                ),
+            )
+            return [
+                item
+                for _, item in ranked[:limit]
+            ]
+
+        combinations = list(
+            rag_context.get(
+                "safe_available_combinations"
+            )
+            or []
+        )
+
+        scored_combinations = []
+        for index, combo in enumerate(combinations):
+            if not isinstance(combo, dict):
+                continue
+
+            score = (
+                score_text(combo.get("location_name"))
+                + score_text(combo.get("primary_poi_type"))
+                + score_text(combo.get("created_day_part"))
+            )
+            scored_combinations.append(
+                (score, index, dict(combo))
+            )
+
+        scored_combinations.sort(
+            key=lambda item: (
+                -item[0],
+                item[1],
+            )
+        )
+        compact_combinations = [
+            combo
+            for _, _, combo in scored_combinations[:limit]
+        ]
+
+        def compact_counts(value: Any) -> dict[str, Any]:
+            if not isinstance(value, dict):
+                return {}
+
+            ranked = sorted(
+                value.items(),
+                key=lambda item: (
+                    -score_text(item[0]),
+                    -int(item[1] or 0),
+                    str(item[0]),
+                ),
+            )
+            return dict(ranked[:limit])
+
+        return {
+            "privacy_note": rag_context.get("privacy_note"),
+            "safe_cohort_count": int(
+                rag_context.get("safe_cohort_count") or 0
+            ),
+            "available_locations": compact_values(
+                rag_context.get("available_locations")
+            ),
+            "available_poi_types": compact_values(
+                rag_context.get("available_poi_types")
+            ),
+            "available_dayparts": compact_values(
+                rag_context.get("available_dayparts")
+            ),
+            "top_poi_counts": compact_counts(
+                rag_context.get("top_poi_counts")
+            ),
+            "top_location_counts": compact_counts(
+                rag_context.get("top_location_counts")
+            ),
+            "safe_available_combinations": compact_combinations,
+            "context_compaction": {
+                "max_context_items": limit,
+                "full_safe_combination_count": len(combinations),
+                "sent_safe_combination_count": len(
+                    compact_combinations
+                ),
+            },
+        }
+
     def _call_llm(
         self,
         *,
         prompt: str,
         rag_context: dict[str, Any],
         config: HybridIntentConfig,
-    ) -> str:
+    ) -> dict[str, Any]:
+        messages = self._build_messages(
+            prompt=prompt,
+            rag_context=rag_context,
+        )
+
+        def validator(content: str) -> dict[str, Any]:
+            parsed = self._parse_json_object(content)
+            confidence = self._safe_float(
+                parsed.get("confidence_score"),
+                default=0.0,
+            )
+            if confidence < config.min_llm_confidence:
+                raise LLMResponseValidationError(
+                    "low_confidence",
+                    (
+                        f"LLM confidence {confidence} below "
+                        f"threshold {config.min_llm_confidence}."
+                    ),
+                )
+            return parsed
+
         if self.llm_client:
-            return self.llm_client(
-                self._build_messages(prompt=prompt, rag_context=rag_context),
+            started = time.monotonic()
+            content = self.llm_client(
+                messages,
                 {
                     "provider": config.provider,
                     "model": config.model,
                     "base_url": config.base_url,
                 },
             )
+            validated = validator(content)
+            latency_ms = int(
+                (time.monotonic() - started)
+                * 1000
+            )
+            return {
+                "content": content,
+                "validated": validated,
+                "telemetry": {
+                    "llm_attempted": True,
+                    "llm_used": True,
+                    "success": True,
+                    "provider_used": config.provider,
+                    "model_used": config.model,
+                    "attempt_count": 1,
+                    "total_latency_ms": latency_ms,
+                    "fallback_used": False,
+                    "fallback_reason": None,
+                    "attempts": [
+                        {
+                            "provider": config.provider,
+                            "model": config.model,
+                            "attempt": 1,
+                            "status": "succeeded",
+                            "latency_ms": latency_ms,
+                            "error_category": None,
+                            "http_status": None,
+                            "error_message": None,
+                            "retryable": False,
+                        }
+                    ],
+                },
+            }
 
-        if not config.api_key:
-            raise RuntimeError("LLM intent is enabled but no API key was found.")
-
-        if not config.model:
-            raise RuntimeError("LLM intent is enabled but LLM_INTENT_MODEL is not set.")
-
-        if not config.base_url:
-            raise RuntimeError("LLM intent is enabled but LLM_INTENT_BASE_URL is not set.")
-
-        payload = {
-            "model": config.model,
-            "messages": self._build_messages(prompt=prompt, rag_context=rag_context),
-            "temperature": 0,
-            "max_tokens": config.max_tokens,
-            "response_format": {"type": "json_object"},
-        }
-
-        headers = {
-            "Authorization": f"Bearer {config.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        if config.provider == "openrouter":
-            headers["X-Title"] = "Punk AI Audience Intelligence Intent Resolver"
-
-        request = urllib.request.Request(
-            config.base_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
+        return LLMModelRouterService().route(
+            messages=messages,
+            primary_provider=config.provider,
+            primary_model=config.model,
+            primary_api_key=config.api_key,
+            primary_base_url=config.base_url,
+            timeout_seconds=config.timeout_seconds,
+            max_tokens=config.max_tokens,
+            validator=validator,
         )
 
-        try:
-            with urllib.request.urlopen(request, timeout=config.timeout_seconds) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"LLM HTTP error {exc.code}: {body[:500]}") from exc
+    def _attach_llm_router_metadata(
+        self,
+        *,
+        result: dict[str, Any],
+        telemetry: dict[str, Any],
+    ) -> dict[str, Any]:
+        output = dict(result)
+        output["llm_attempted"] = bool(
+            telemetry.get("llm_attempted")
+        )
+        output["llm_used"] = bool(
+            output.get("llm_used")
+            and telemetry.get("llm_used")
+        )
+        output["llm_provider"] = telemetry.get(
+            "provider_used"
+        )
+        output["llm_model"] = telemetry.get(
+            "model_used"
+        )
+        output["llm_attempt_count"] = int(
+            telemetry.get("attempt_count") or 0
+        )
+        output["llm_latency_ms"] = int(
+            telemetry.get("total_latency_ms") or 0
+        )
+        output["llm_fallback_used"] = bool(
+            telemetry.get("fallback_used")
+        )
+        output["llm_fallback_reason"] = telemetry.get(
+            "fallback_reason"
+        )
+        output["llm_router_attempts"] = list(
+            telemetry.get("attempts") or []
+        )
+        return output
 
-        return data["choices"][0]["message"]["content"]
+    def _fallback_resolver_mode(
+        self,
+        telemetry: dict[str, Any],
+    ) -> str:
+        categories = {
+            str(item.get("error_category") or "")
+            for item in (telemetry.get("attempts") or [])
+            if item.get("status") == "failed"
+        }
+        categories.discard("")
+
+        if categories and categories == {"low_confidence"}:
+            return "deterministic_fallback_low_llm_confidence"
+
+        return "deterministic_fallback_llm_failed"
+
+    def _router_error_summary(
+        self,
+        telemetry: dict[str, Any],
+    ) -> str:
+        failures = []
+        for item in telemetry.get("attempts") or []:
+            if item.get("status") != "failed":
+                continue
+            provider = item.get("provider") or "unknown"
+            model = item.get("model") or "unknown"
+            category = (
+                item.get("error_category")
+                or "unknown_error"
+            )
+            status = item.get("http_status")
+            suffix = f" HTTP {status}" if status else ""
+            failures.append(
+                f"{provider}/{model}: {category}{suffix}"
+            )
+
+        if not failures:
+            return "All configured LLM models failed."
+
+        return (
+            "All configured LLM models failed: "
+            + "; ".join(failures[:5])
+        )
 
     def _build_messages(self, *, prompt: str, rag_context: dict[str, Any]) -> list[dict[str, str]]:
         system = """
