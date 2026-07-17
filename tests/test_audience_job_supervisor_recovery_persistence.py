@@ -172,4 +172,3 @@ def test_run_history_failure_uses_safe_specific_code():
     )
     assert "database URL" not in error
     assert "private details" not in error
-
