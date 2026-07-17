@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Dict, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from app.services.audience_supervisor_decision_service import (
     AudienceSupervisorDecisionService,
+)
+from app.services.audience_supervisor_recovery_service import (
+    AudienceSupervisorRecoveryService,
 )
 
 
@@ -24,6 +28,7 @@ class AudienceWorkflowState(TypedDict, total=False):
     supervisor_stage: str
     terminal_status: str
     graph_trace: list[Dict[str, Any]]
+    recovery: Dict[str, Any]
     error_type: str
 
 
@@ -66,6 +71,8 @@ class AudienceSupervisorGraph:
         *,
         orchestrator_factory: OrchestratorFactory | None = None,
         decision_service: AudienceSupervisorDecisionService | None = None,
+        recovery_service: AudienceSupervisorRecoveryService | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         self.orchestrator_factory = (
             orchestrator_factory
@@ -75,6 +82,11 @@ class AudienceSupervisorGraph:
             decision_service
             or AudienceSupervisorDecisionService()
         )
+        self.recovery_service = (
+            recovery_service
+            or AudienceSupervisorRecoveryService()
+        )
+        self.sleep_fn = sleep_fn or time.sleep
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -156,6 +168,10 @@ class AudienceSupervisorGraph:
         result["supervisor_graph_trace"] = graph_trace
         result["supervisor_trace"] = graph_trace
 
+        recovery = dict(final_state.get("recovery") or {})
+        if recovery:
+            result["supervisor_recovery"] = recovery
+
         error_type = final_state.get("error_type")
         if error_type:
             result["supervisor_graph_error_type"] = error_type
@@ -167,43 +183,144 @@ class AudienceSupervisorGraph:
         state: AudienceWorkflowState,
     ) -> AudienceWorkflowState:
         trace = list(state.get("graph_trace") or [])
+        execution_kwargs = dict(
+            state.get("execution_kwargs") or {}
+        )
+        max_attempts = self.recovery_service.max_attempts()
+        backoff_seconds = (
+            self.recovery_service.retry_backoff_seconds()
+        )
+        last_decision: Dict[str, Any] = {}
+        orchestrator = self.orchestrator_factory()
 
-        try:
-            result = self.orchestrator_factory().run(
-                **dict(state.get("execution_kwargs") or {})
+        for attempt in range(1, max_attempts + 1):
+            trace.append(
+                {
+                    "event": "orchestrator_attempt_started",
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                }
             )
-            if not isinstance(result, dict):
-                raise TypeError(
-                    "Audience orchestrator must return a dictionary"
+
+            try:
+                result = orchestrator.run(
+                    **execution_kwargs
+                )
+                if not isinstance(result, dict):
+                    raise TypeError(
+                        "Audience orchestrator must return a dictionary"
+                    )
+
+                trace.append(
+                    {
+                        "event": "orchestrator_completed",
+                        "run_id": result.get("run_id"),
+                        "pipeline_status": result.get("status"),
+                        "attempt": attempt,
+                    }
+                )
+                return {
+                    "pipeline_result": dict(result),
+                    "recovery": {
+                        "attempt_count": attempt,
+                        "max_attempts": max_attempts,
+                        "retried": attempt > 1,
+                        "exhausted": False,
+                        "last_error_category": (
+                            last_decision.get("error_category")
+                        ),
+                    },
+                    "graph_trace": trace,
+                }
+            except Exception as exc:
+                last_decision = (
+                    self.recovery_service.classify(exc)
+                )
+                retryable = bool(
+                    last_decision.get("retryable")
+                )
+                safe_error_type = str(
+                    last_decision.get("safe_error_type")
+                    or type(exc).__name__
+                )
+                error_category = str(
+                    last_decision.get("error_category")
+                    or "non_transient"
+                )
+                should_retry = (
+                    retryable and attempt < max_attempts
                 )
 
-            trace.append(
-                {
-                    "event": "orchestrator_completed",
-                    "run_id": result.get("run_id"),
-                    "pipeline_status": result.get("status"),
+                trace.append(
+                    {
+                        "event": "orchestrator_attempt_failed",
+                        "attempt": attempt,
+                        "error_type": safe_error_type,
+                        "error_category": error_category,
+                        "retryable": retryable,
+                    }
+                )
+
+                if should_retry:
+                    delay = backoff_seconds * attempt
+                    trace.append(
+                        {
+                            "event": "orchestrator_retry_scheduled",
+                            "attempt": attempt,
+                            "next_attempt": attempt + 1,
+                            "delay_seconds": delay,
+                        }
+                    )
+                    if delay:
+                        self.sleep_fn(delay)
+                    continue
+
+                trace.append(
+                    {
+                        "event": "orchestrator_failed",
+                        "error_type": safe_error_type,
+                        "error_category": error_category,
+                        "attempt_count": attempt,
+                        "retry_exhausted": (
+                            retryable
+                            and attempt >= max_attempts
+                        ),
+                    }
+                )
+                return {
+                    "pipeline_result": {
+                        "status": "failed",
+                        "error": "orchestrator_execution_failed",
+                    },
+                    "recovery": {
+                        "attempt_count": attempt,
+                        "max_attempts": max_attempts,
+                        "retried": attempt > 1,
+                        "exhausted": (
+                            retryable
+                            and attempt >= max_attempts
+                        ),
+                        "last_error_category": error_category,
+                    },
+                    "error_type": safe_error_type,
+                    "graph_trace": trace,
                 }
-            )
-            return {
-                "pipeline_result": dict(result),
-                "graph_trace": trace,
-            }
-        except Exception as exc:
-            error_type = type(exc).__name__
-            trace.append(
-                {
-                    "event": "orchestrator_failed",
-                    "error_type": error_type,
-                }
-            )
-            return {
-                "pipeline_result": {
-                    "status": "failed",
-                    "error": "orchestrator_execution_failed",
-                },
-                "error_type": error_type,
-                "graph_trace": trace,
-            }
+
+        return {
+            "pipeline_result": {
+                "status": "failed",
+                "error": "orchestrator_execution_failed",
+            },
+            "recovery": {
+                "attempt_count": max_attempts,
+                "max_attempts": max_attempts,
+                "retried": max_attempts > 1,
+                "exhausted": True,
+                "last_error_category": "unknown",
+            },
+            "error_type": "UnknownError",
+            "graph_trace": trace,
+        }
 
     def _evaluate_supervisor_node(
         self,
