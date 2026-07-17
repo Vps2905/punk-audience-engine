@@ -16,6 +16,7 @@ from app.core.audience_job_store import AudienceJobStore
 from app.core.api_key_auth import require_audience_api_key
 from app.core.production_guardrails import local_file_storage_allowed
 from app.services.audience_run_history_service import AudienceRunHistoryService
+from app.services.audience_supervisor_recovery_service import AudienceSupervisorRecoveryService
 
 
 router = APIRouter(
@@ -34,6 +35,165 @@ def _audience_execution_agent():
     )
 
 job_store = AudienceJobStore()
+
+
+
+class AudienceRunHistoryPersistenceError(
+    RuntimeError
+):
+    """Safe internal marker for run-history persistence failure."""
+
+
+_SAFE_TRACE_KEYS = {
+    "event",
+    "run_id",
+    "pipeline_status",
+    "route",
+    "stage",
+    "reason_codes",
+    "attempt",
+    "max_attempts",
+    "next_attempt",
+    "delay_seconds",
+    "error_type",
+    "error_category",
+    "retryable",
+    "attempt_count",
+    "retry_exhausted",
+    "terminal_status",
+}
+
+
+def _safe_trace_items(value: Any) -> list[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    output: list[Dict[str, Any]] = []
+
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+
+        clean: Dict[str, Any] = {}
+
+        for key in _SAFE_TRACE_KEYS:
+            if key not in item:
+                continue
+
+            field_value = item.get(key)
+
+            if key == "reason_codes":
+                clean[key] = [
+                    str(code)
+                    for code in (
+                        field_value
+                        if isinstance(field_value, list)
+                        else []
+                    )
+                ]
+            elif isinstance(
+                field_value,
+                (str, int, float, bool),
+            ) or field_value is None:
+                clean[key] = field_value
+
+        if clean:
+            output.append(clean)
+
+    return output
+
+
+def _safe_supervisor_decision(
+    value: Any,
+) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    output: Dict[str, Any] = {}
+
+    for key in (
+        "route",
+        "stage",
+        "terminal",
+        "awaiting_input",
+        "approval_required",
+        "downstream_export_enabled",
+        "next_action",
+    ):
+        field_value = value.get(key)
+
+        if isinstance(
+            field_value,
+            (str, int, float, bool),
+        ) or field_value is None:
+            output[key] = field_value
+
+    output["reason_codes"] = [
+        str(code)
+        for code in (
+            value.get("reason_codes")
+            if isinstance(value.get("reason_codes"), list)
+            else []
+        )
+    ]
+
+    return output
+
+
+def _safe_supervisor_recovery(
+    value: Any,
+) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    output: Dict[str, Any] = {}
+
+    for key in (
+        "attempt_count",
+        "max_attempts",
+        "retried",
+        "exhausted",
+        "last_error_category",
+    ):
+        field_value = value.get(key)
+
+        if isinstance(
+            field_value,
+            (str, int, float, bool),
+        ) or field_value is None:
+            output[key] = field_value
+
+    return output
+
+
+def _safe_job_error(exc: BaseException) -> str:
+    if isinstance(
+        exc,
+        AudienceRunHistoryPersistenceError,
+    ):
+        return (
+            "audience_job_failed:"
+            "run_history_persistence:"
+            "AudienceRunHistoryPersistenceError"
+        )
+
+    classification = (
+        AudienceSupervisorRecoveryService().classify(exc)
+    )
+    category = str(
+        classification.get("error_category")
+        or "unknown"
+    )
+    error_type = str(
+        classification.get("safe_error_type")
+        or type(exc).__name__
+    )
+
+    return (
+        "audience_job_failed:"
+        f"{category}:"
+        f"{error_type}"
+    )
 
 
 class AudienceJobRequest(BaseModel):
@@ -342,9 +502,8 @@ def _run_job_background(job_id: str) -> None:
             uses_postgres_job_store
             and run_history.get("status") != "persisted"
         ):
-            raise RuntimeError(
-                "Audience run-history persistence failed for async job "
-                f"{job_id}: {run_history}"
+            raise AudienceRunHistoryPersistenceError(
+                "audience_run_history_persistence_failed"
             )
 
         job_store.update_status(
@@ -361,7 +520,7 @@ def _run_job_background(job_id: str) -> None:
             status="failed",
             stage="failed",
             message="Audience Intelligence job failed.",
-            error=str(exc),
+            error=_safe_job_error(exc),
         )
 
 
@@ -538,7 +697,7 @@ def approve_job_export(
 
 
 def _safe_result_for_job(result: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    safe_result = {
         "status": result.get("status"),
         "run_id": result.get("run_id"),
         "freshness_status": result.get("freshness_status"),
@@ -583,6 +742,67 @@ def _safe_result_for_job(result: Dict[str, Any]) -> Dict[str, Any]:
         "privacy_guarantees": result.get("privacy_guarantees"),
         "run_history": result.get("run_history"),
     }
+
+    supervisor_decision = _safe_supervisor_decision(
+        result.get("supervisor_decision")
+    )
+    if supervisor_decision:
+        safe_result["supervisor_decision"] = (
+            supervisor_decision
+        )
+        safe_result["supervisor_route"] = result.get(
+            "supervisor_route"
+        )
+        safe_result["supervisor_stage"] = result.get(
+            "supervisor_stage"
+        )
+        safe_result["supervisor_reason_codes"] = [
+            str(code)
+            for code in (
+                result.get("supervisor_reason_codes")
+                if isinstance(
+                    result.get("supervisor_reason_codes"),
+                    list,
+                )
+                else []
+            )
+        ]
+        safe_result["supervisor_trace"] = (
+            _safe_trace_items(
+                result.get("supervisor_trace")
+            )
+        )
+
+    graph_terminal_status = result.get(
+        "graph_terminal_status"
+    )
+    if graph_terminal_status:
+        safe_result["graph_terminal_status"] = (
+            graph_terminal_status
+        )
+        safe_result["supervisor_graph_trace"] = (
+            _safe_trace_items(
+                result.get("supervisor_graph_trace")
+            )
+        )
+
+    supervisor_recovery = _safe_supervisor_recovery(
+        result.get("supervisor_recovery")
+    )
+    if supervisor_recovery:
+        safe_result["supervisor_recovery"] = (
+            supervisor_recovery
+        )
+
+    graph_error_type = result.get(
+        "supervisor_graph_error_type"
+    )
+    if graph_error_type:
+        safe_result["supervisor_graph_error_type"] = str(
+            graph_error_type
+        )
+
+    return safe_result
 
 
 def _build_business_summary(result: Dict[str, Any]) -> str:

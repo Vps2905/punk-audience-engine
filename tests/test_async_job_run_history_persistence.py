@@ -170,6 +170,8 @@ def test_async_postgres_job_fails_when_run_history_fails(
     jobs._run_job_background("job_async_1")
 
     assert store.updates[-1]["status"] == "failed"
-    assert "run-history persistence failed" in (
-        store.updates[-1]["error"]
+    assert store.updates[-1]["error"] == (
+        "audience_job_failed:"
+        "run_history_persistence:"
+        "AudienceRunHistoryPersistenceError"
     )
