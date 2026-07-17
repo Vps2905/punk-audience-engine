@@ -114,6 +114,9 @@ class AudienceSupervisorGraph:
 
         return builder.compile()
 
+    def run(self, **kwargs: Any) -> Dict[str, Any]:
+        return self.invoke(**kwargs)
+
     def invoke(self, **kwargs: Any) -> Dict[str, Any]:
         prompt = str(kwargs.get("prompt") or "").strip()
         if not prompt:
@@ -141,12 +144,17 @@ class AudienceSupervisorGraph:
         result["supervisor_stage"] = final_state.get(
             "supervisor_stage"
         )
+        result["supervisor_reason_codes"] = list(
+            decision.get("reason_codes") or []
+        )
         result["graph_terminal_status"] = final_state.get(
             "terminal_status"
         )
-        result["supervisor_graph_trace"] = list(
+        graph_trace = list(
             final_state.get("graph_trace") or []
         )
+        result["supervisor_graph_trace"] = graph_trace
+        result["supervisor_trace"] = graph_trace
 
         error_type = final_state.get("error_type")
         if error_type:

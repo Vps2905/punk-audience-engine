@@ -391,6 +391,20 @@ def _build_prompt_api_response(
             }
         )
 
+        if result.get("graph_terminal_status"):
+            response["graph_terminal_status"] = result.get(
+                "graph_terminal_status"
+            )
+            response["supervisor_graph_trace"] = list(
+                result.get("supervisor_graph_trace")
+                or []
+            )
+
+        if result.get("supervisor_graph_error_type"):
+            response["supervisor_graph_error_type"] = result.get(
+                "supervisor_graph_error_type"
+            )
+
     return response
 
 

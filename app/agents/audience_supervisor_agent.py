@@ -55,11 +55,33 @@ def autonomous_supervisor_enabled(
     return False
 
 
+def autonomous_supervisor_graph_enabled(
+    value: Any | None = None,
+) -> bool:
+    raw = (
+        os.getenv(
+            "ENABLE_AUTONOMOUS_SUPERVISOR_GRAPH",
+            "false",
+        )
+        if value is None
+        else value
+    )
+    normalized = str(raw or "").strip().lower()
+
+    if normalized in _TRUE_FLAG_VALUES:
+        return True
+    if normalized in _FALSE_FLAG_VALUES:
+        return False
+
+    return False
+
+
 def build_audience_execution_agent(
     *,
     orchestrator_factory: OrchestratorFactory | None = None,
 ) -> OrchestratorProtocol:
-    # Select the backward-compatible execution path for API entry points.
+    # The parent supervisor gate must be enabled before graph execution can
+    # be selected. Unknown flag values preserve the safer legacy path.
     factory = (
         orchestrator_factory
         or _default_orchestrator_factory
@@ -67,6 +89,15 @@ def build_audience_execution_agent(
 
     if not autonomous_supervisor_enabled():
         return factory()
+
+    if autonomous_supervisor_graph_enabled():
+        from app.agents.audience_supervisor_graph import (
+            AudienceSupervisorGraph,
+        )
+
+        return AudienceSupervisorGraph(
+            orchestrator_factory=factory,
+        )
 
     return AudienceSupervisorAgent(
         orchestrator_factory=factory,
