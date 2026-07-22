@@ -179,6 +179,13 @@ class AudienceSupervisorDecisionService:
                 next_action="Select an existing approved audience run before requesting delivery.",
             )
 
+        if approval_status == "blocked_requested_quality_unmet":
+            return self._blocked(
+                stage="coverage",
+                reasons=("requested_quality_unmet",),
+                next_action="Wait for stronger/fresher cohorts, use balanced quality when broader coverage is acceptable, or review the quality requirement.",
+            )
+
         if (
             filter_mode == "location_category_gap_no_export"
             or approval_status == "blocked_no_safe_exact_match"

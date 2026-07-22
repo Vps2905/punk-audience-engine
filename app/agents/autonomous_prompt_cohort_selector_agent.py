@@ -118,14 +118,18 @@ class AutonomousPromptCohortSelectorAgent:
 
         available_locations = self._available_values(df, loc_col)
 
-        # Hard UI/report cleanup:
-        # If the user explicitly requested a city/market and the safe cohort
-        # metadata has no coverage for it, do not even show cross-city selected
-        # cohorts. This keeps Prompt-selected cohorts and Exported audiences both 0.
-        if requested_locations and not self._has_requested_location_coverage(
+        coverage_analysis = self._analyze_location_coverage(
             requested_locations=requested_locations,
             available_locations=available_locations,
-        ):
+        )
+        matched_locations = coverage_analysis["matched"]
+        missing_locations = coverage_analysis["missing"]
+
+        # Hard UI/report cleanup:
+        # If the user explicitly requested a city/market and the safe cohort
+        # metadata has no coverage for ANY of them, do not even show cross-city selected
+        # cohorts. This keeps Prompt-selected cohorts and Exported audiences both 0.
+        if requested_locations and not matched_locations:
             report = {
                 "filter_mode": "location_category_gap_no_export",
                 "locations_detected": requested_locations,
@@ -201,14 +205,25 @@ class AutonomousPromptCohortSelectorAgent:
             if has_daypart_request and daypart_score < self.config.min_daypart_score:
                 continue
 
-            quality_score = self._safe_float(row.get("quality_score"), default=0.0)
+            quality_intent = intent.get("quality_intent") or "balanced"
+
+            mqs = self._safe_float(row.get("management_quality_score"), default=-1.0)
+            qs = self._safe_float(row.get("quality_score"), default=0.0)
+            val = mqs if mqs >= 0.0 else qs
+            if val > 1.0:
+                val = val / 100.0
+            quality_score = min(max(val, 0.0), 1.0)
+
+            w_sem, w_loc, w_poi, w_day, w_qual = 0.35, 0.25, 0.25, 0.10, 0.05
+            if quality_intent == "high":
+                w_sem, w_loc, w_poi, w_day, w_qual = 0.30, 0.20, 0.25, 0.10, 0.15
 
             final_score = (
-                0.35 * float(semantic_scores[idx])
-                + 0.25 * location_score
-                + 0.25 * poi_score
-                + 0.10 * daypart_score
-                + 0.05 * min(max(quality_score, 0.0), 1.0)
+                w_sem * float(semantic_scores[idx])
+                + w_loc * location_score
+                + w_poi * poi_score
+                + w_day * daypart_score
+                + w_qual * quality_score
             )
 
             if final_score < self.config.min_final_score:
@@ -233,6 +248,8 @@ class AutonomousPromptCohortSelectorAgent:
                 coverage_warnings.append(
                     "A specific location and business/category were requested, but no strong privacy-safe match exists. Cross-location or category-only fallback audiences were blocked from export."
                 )
+            for loc in missing_locations:
+                coverage_warnings.append(f"{loc} was requested, but no privacy-safe cohort exists for that location.")
 
             return selected, {
                 "status": "completed",
@@ -288,6 +305,8 @@ class AutonomousPromptCohortSelectorAgent:
                 coverage_warnings.append(
                     "A specific location and business/category were requested, but only generic POI matches were available. Generic fallback audiences were blocked from export."
                 )
+            for loc in missing_locations:
+                coverage_warnings.append(f"{loc} was requested, but no privacy-safe cohort exists for that location.")
 
             return selected, {
                 "status": "completed",
@@ -307,6 +326,10 @@ class AutonomousPromptCohortSelectorAgent:
                 "rescued_available_poi_matches": rescued_pois,
             }
 
+        coverage_warnings = []
+        for loc in missing_locations:
+            coverage_warnings.append(f"{loc} was requested, but no privacy-safe cohort exists for that location.")
+
         return selected, {
             "status": "completed",
             "filter_mode": "+".join(filter_parts) if filter_parts else "semantic",
@@ -314,13 +337,13 @@ class AutonomousPromptCohortSelectorAgent:
             "locations_detected": requested_locations,
             "poi_terms_detected": self._display_poi_terms(intent),
             "dayparts_detected": requested_dayparts,
-                "schedule_qualifiers_detected": schedule_qualifiers,
-            "coverage_warnings": [],
+            "schedule_qualifiers_detected": schedule_qualifiers,
+            "coverage_warnings": coverage_warnings,
             "selected_count": int(len(selected)),
             "llm_used": bool(intent.get("llm_used")),
             "resolver_mode": intent.get("resolver_mode"),
             "business_intent": intent.get("business_intent"),
-                "rescued_available_poi_matches": rescued_pois,
+            "rescued_available_poi_matches": rescued_pois,
         }
 
     def _resolve_intent(self, prompt: str, df: pd.DataFrame) -> dict[str, Any]:
@@ -574,33 +597,39 @@ class AutonomousPromptCohortSelectorAgent:
 
 
 
-    def _has_requested_location_coverage(
+    def _analyze_location_coverage(
         self,
         *,
         requested_locations: list[str],
         available_locations: list[str],
-    ) -> bool:
+    ) -> dict[str, list[str]]:
         if not requested_locations:
-            return True
+            return {"matched": [], "missing": []}
 
         available = [self._norm(value) for value in available_locations if self._norm(value)]
+        matched = []
+        missing = []
 
         if not available:
-            return False
+            return {"matched": [], "missing": [loc for loc in requested_locations if self._norm(loc)]}
 
         for requested in requested_locations:
             req = self._norm(requested)
             if not req:
                 continue
 
+            has_match = False
             for loc in available:
-                # Exact or safe sub-area match:
-                # new york can match times square, new york.
-                # montreal can match montreal downtown.
                 if req == loc or req in loc or loc in req:
-                    return True
+                    has_match = True
+                    break
 
-        return False
+            if has_match:
+                matched.append(requested)
+            else:
+                missing.append(requested)
+
+        return {"matched": matched, "missing": missing}
 
     def _available_values(self, df: pd.DataFrame, column: str | None) -> list[str]:
         if not column or column not in df.columns:

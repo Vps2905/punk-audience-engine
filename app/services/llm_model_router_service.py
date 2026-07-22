@@ -148,7 +148,20 @@ class LLMModelRouterService:
                         timeout_seconds=timeout_seconds,
                         max_tokens=max_tokens,
                     )
-                    validated = validator(content)
+                    try:
+                        validated = validator(content)
+                    except LLMResponseValidationError:
+                        raise
+                    except json.JSONDecodeError as exc:
+                        raise LLMResponseValidationError(
+                            "invalid_json",
+                            "Model output was not valid JSON.",
+                        ) from exc
+                    except ValueError as exc:
+                        raise LLMResponseValidationError(
+                            "invalid_json",
+                            "Model output failed JSON validation.",
+                        ) from exc
                     latency_ms = self._elapsed_ms(
                         attempt_started
                     )
@@ -429,6 +442,19 @@ class LLMModelRouterService:
                 "type": "json_object",
             },
         }
+
+        if target.provider == "openrouter":
+            reasoning_effort = os.getenv(
+                "LLM_INTENT_REASONING_EFFORT",
+                "none",
+            ).strip().lower()
+
+            if reasoning_effort:
+                payload["reasoning"] = {
+                    "effort": reasoning_effort,
+                    "exclude": True,
+                }
+
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -454,17 +480,64 @@ class LLMModelRouterService:
                 response.read().decode("utf-8")
             )
 
-        content = (
-            ((data.get("choices") or [{}])[0].get("message") or {})
-            .get("content")
+        choices = data.get("choices") or []
+        choice = choices[0] if choices else {}
+        message = choice.get("message") or {}
+
+        content = self._extract_message_content(
+            message.get("content")
         )
-        if not isinstance(content, str) or not content.strip():
+
+        if not content:
+            finish_reason = choice.get("finish_reason")
+            native_finish_reason = choice.get(
+                "native_finish_reason"
+            )
+            reasoning_present = bool(message.get("reasoning"))
+            tool_calls_present = bool(message.get("tool_calls"))
+
             raise LLMResponseValidationError(
                 "empty_response",
-                "LLM response did not contain message content.",
+                (
+                    "LLM response contained no usable message content. "
+                    f"finish_reason={finish_reason!r}; "
+                    f"native_finish_reason={native_finish_reason!r}; "
+                    f"reasoning_present={reasoning_present}; "
+                    f"tool_calls_present={tool_calls_present}."
+                ),
             )
 
         return content
+
+    @staticmethod
+    def _extract_message_content(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+
+        if not isinstance(value, list):
+            return ""
+
+        parts: list[str] = []
+
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            text = item.get("text")
+
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+                continue
+
+            nested_content = item.get("content")
+
+            if (
+                isinstance(nested_content, str)
+                and nested_content.strip()
+            ):
+                parts.append(nested_content.strip())
+
+        return "\n".join(parts).strip()
 
     def _classify_http_status(self, status: int) -> str:
         if status == 402:
@@ -502,10 +575,7 @@ class LLMModelRouterService:
             "error_category": category,
             "http_status": http_status,
             "error_message": (
-                self._telemetry_error_message(
-                    category=category,
-                    http_status=http_status,
-                )
+                str(error_message)[:500]
                 if error_message
                 else None
             ),

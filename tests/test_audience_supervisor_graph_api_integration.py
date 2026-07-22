@@ -6,8 +6,8 @@ from app.agents.audience_supervisor_agent import (
     AudienceSupervisorAgent,
     autonomous_supervisor_graph_enabled,
 )
-from app.agents.audience_supervisor_graph import (
-    AudienceSupervisorGraph,
+from app.agents.autonomous_decision_core_agent import (
+    AutonomousDecisionCoreAgent,
 )
 from app.api import audience_intelligence_jobs as jobs_api
 from app.api import audience_intelligence_prompt as prompt_api
@@ -19,11 +19,39 @@ class FakeOrchestrator:
             "status": "completed",
             "run_id": "run_graph_feature_flag_test",
             "prompt": kwargs.get("prompt"),
+            "source_mode": "postgres_safe_derived",
             "approval_status": "pending_approval",
             "downstream_export_enabled": False,
+            "prompt_selected_cohorts": 4,
+            "prompt_filter_report": {
+                "locations_detected": ["montreal"],
+                "matched_requested_locations": ["montreal"],
+                "missing_requested_locations": [],
+                "coverage_status": "complete",
+                "fulfillment_status": "complete",
+                "quality_policy_report": {
+                    "quality_policy_status": "satisfied",
+                    "quality_thresholds_by_location": {"montreal": 0.5},
+                    "quality_candidates_before": 4,
+                    "quality_candidates_after": 4,
+                },
+                "v2_guided_selection": {
+                    "rows": 4,
+                    "coverage_status": "complete",
+                    "matched_requested_locations": ["montreal"],
+                    "missing_requested_locations": [],
+                    "block_export": False,
+                    "downstream_export_enabled": False,
+                },
+            },
             "safe_export": {
                 "approval_status": "pending_approval",
                 "downstream_export_enabled": False,
+                "exported_cohorts": 4,
+                "exported_lookalike_pairs": 12,
+            },
+            "privacy_guarantees": {
+                "individual_user_data_exported": False,
             },
         }
 
@@ -118,11 +146,11 @@ def test_graph_selected_for_both_api_paths(
 
     assert isinstance(
         prompt_api._audience_execution_agent(),
-        AudienceSupervisorGraph,
+        AutonomousDecisionCoreAgent,
     )
     assert isinstance(
         jobs_api._audience_execution_agent(),
-        AudienceSupervisorGraph,
+        AutonomousDecisionCoreAgent,
     )
 
 
@@ -143,7 +171,7 @@ def test_unknown_graph_flag_preserves_supervisor_wrapper(
 
 
 def test_graph_run_matches_api_agent_contract():
-    graph = AudienceSupervisorGraph(
+    graph = AutonomousDecisionCoreAgent(
         orchestrator_factory=FakeOrchestrator,
     )
 
@@ -162,7 +190,7 @@ def test_graph_run_matches_api_agent_contract():
 
 
 def test_prompt_response_exposes_graph_metadata():
-    graph = AudienceSupervisorGraph(
+    graph = AutonomousDecisionCoreAgent(
         orchestrator_factory=FakeOrchestrator,
     )
     result = graph.run(

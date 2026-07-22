@@ -11,6 +11,10 @@ from typing import Any, Callable, Dict, Optional
 import pandas as pd
 
 from app.agents.semantic_prompt_intelligence_agent import SemanticPromptIntelligenceAgent
+from app.services.local_semantic_intent_service import (
+    LocalSemanticIntentService,
+    LocalSemanticIntentUnavailableError,
+)
 from app.services.llm_model_router_service import (
     LLMModelRouterError,
     LLMModelRouterService,
@@ -71,6 +75,34 @@ class HybridSemanticIntentAgent:
         )
 
         if not config.enabled:
+            local_result = self._try_local_semantic(
+                prompt=prompt,
+                fallback=fallback,
+                rag_context=rag_context,
+                resolver_mode=(
+                    "local_semantic_primary_llm_disabled"
+                ),
+                llm_error=None,
+                telemetry={
+                    "llm_attempted": False,
+                    "llm_used": False,
+                    "attempt_count": 0,
+                    "total_latency_ms": 0,
+                    "fallback_used": True,
+                    "fallback_reason": (
+                        "local_semantic_primary_llm_disabled"
+                    ),
+                    "attempts": [],
+                },
+            )
+
+            if local_result is not None:
+                self._write_result(
+                    local_result,
+                    output_dir,
+                )
+                return local_result
+
             result = self._with_hybrid_metadata(
                 fallback,
                 rag_context=rag_context,
@@ -118,6 +150,24 @@ class HybridSemanticIntentAgent:
 
         except LLMModelRouterError as exc:
             telemetry = exc.telemetry or {}
+
+            local_result = self._try_local_semantic(
+                prompt=prompt,
+                fallback=fallback,
+                rag_context=rag_context,
+                resolver_mode=(
+                    "local_semantic_fallback_llm_failed"
+                ),
+                llm_error=type(exc).__name__,
+                telemetry=telemetry,
+            )
+
+            if local_result is not None:
+                self._write_result(
+                    local_result,
+                    output_dir,
+                )
+                return local_result
             resolver_mode = self._fallback_resolver_mode(
                 telemetry
             )
@@ -138,6 +188,34 @@ class HybridSemanticIntentAgent:
             return result
 
         except Exception as exc:
+            local_result = self._try_local_semantic(
+                prompt=prompt,
+                fallback=fallback,
+                rag_context=rag_context,
+                resolver_mode=(
+                    "local_semantic_fallback_llm_failed"
+                ),
+                llm_error=type(exc).__name__,
+                telemetry={
+                    "llm_attempted": True,
+                    "llm_used": False,
+                    "attempt_count": 1,
+                    "total_latency_ms": 0,
+                    "fallback_used": True,
+                    "fallback_reason": (
+                        "local_semantic_fallback_llm_failed"
+                    ),
+                    "attempts": [],
+                },
+            )
+
+            if local_result is not None:
+                self._write_result(
+                    local_result,
+                    output_dir,
+                )
+                return local_result
+
             result = self._with_hybrid_metadata(
                 fallback,
                 rag_context=rag_context,
@@ -159,6 +237,112 @@ class HybridSemanticIntentAgent:
             )
             self._write_result(result, output_dir)
             return result
+
+    def _local_semantic_enabled(self) -> bool:
+        return os.getenv(
+            "ENABLE_LOCAL_SEMANTIC_INTENT",
+            "false",
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _try_local_semantic(
+        self,
+        *,
+        prompt: str,
+        fallback: dict[str, Any],
+        rag_context: dict[str, Any],
+        resolver_mode: str,
+        llm_error: str | None,
+        telemetry: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if not self._local_semantic_enabled():
+            return None
+
+        try:
+            local_rag_context = dict(
+                rag_context or {}
+            )
+
+            local_rag_context[
+                "requested_location_candidates"
+            ] = (
+                fallback.get("locations")
+                or fallback.get("locations_detected")
+                or []
+            )
+
+            local_intent = (
+                LocalSemanticIntentService().resolve(
+                    prompt=prompt,
+                    rag_context=local_rag_context,
+                )
+            )
+
+            result = self._validate_and_merge_llm_intent(
+                prompt=prompt,
+                fallback=fallback,
+                llm_json=local_intent,
+                rag_context=rag_context,
+                min_confidence=float(
+                    os.getenv(
+                        "LOCAL_SEMANTIC_MIN_CONFIDENCE",
+                        "0.55",
+                    )
+                ),
+            )
+
+            if str(
+                result.get("resolver_mode") or ""
+            ).startswith(
+                "deterministic_fallback_low"
+            ):
+                return None
+
+            result["llm_used"] = False
+            result["resolver_mode"] = resolver_mode
+            result["llm_error"] = llm_error
+            result["local_semantic_used"] = True
+            result["local_semantic_model"] = os.getenv(
+                "LOCAL_SEMANTIC_MODEL",
+                "all-MiniLM-L6-v2",
+            )
+            result["extraction_method"] = (
+                "local_sentence_transformer_rag_intent_v1"
+            )
+            result["local_semantic_scores"] = (
+                local_intent.get("_semantic_scores") or {}
+            )
+
+            if (
+                telemetry is not None
+                and hasattr(
+                    self,
+                    "_attach_llm_router_metadata",
+                )
+            ):
+                safe_telemetry = dict(telemetry)
+                safe_telemetry["fallback_used"] = True
+                safe_telemetry["fallback_reason"] = (
+                    resolver_mode
+                )
+
+                result = (
+                    self._attach_llm_router_metadata(
+                        result=result,
+                        telemetry=safe_telemetry,
+                    )
+                )
+
+            return result
+
+        except LocalSemanticIntentUnavailableError:
+            return None
+        except Exception:
+            return None
 
     def _load_config(self) -> HybridIntentConfig:
         enabled = os.getenv("ENABLE_LLM_INTENT", "false").strip().lower() in {

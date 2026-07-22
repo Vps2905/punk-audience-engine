@@ -38,6 +38,7 @@ class AutonomousAudienceIntelligenceV2Service:
         previous_freshness_report_path: str | Path | None = None,
         freshness_source_df: pd.DataFrame | None = None,
         persist_artifacts: bool = True,
+        semantic_intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         output_path = Path(output_dir)
 
@@ -71,6 +72,14 @@ class AutonomousAudienceIntelligenceV2Service:
                 else None
             ),
         )
+
+        if semantic_intent:
+            if "locations" in semantic_intent:
+                prompt_intent["locations"] = semantic_intent["locations"]
+            if "categories" in semantic_intent:
+                prompt_intent["canonical_categories"] = semantic_intent["categories"]
+            if "dayparts" in semantic_intent:
+                prompt_intent["dayparts"] = semantic_intent["dayparts"]
 
         embedding_service = AllSafeCohortEmbeddingService()
         embedding_kwargs = {
@@ -254,7 +263,7 @@ class AutonomousAudienceIntelligenceV2Service:
 
             if exact.empty:
                 warnings.append(
-                    f"{loc} was requested, but no exact safe cohort matched the requested category/daypart."
+                    f"{loc} had no exact privacy-safe candidate for the requested category/daypart."
                 )
 
         return warnings

@@ -91,11 +91,11 @@ def build_audience_execution_agent(
         return factory()
 
     if autonomous_supervisor_graph_enabled():
-        from app.agents.audience_supervisor_graph import (
-            AudienceSupervisorGraph,
+        from app.agents.autonomous_decision_core_agent import (
+            AutonomousDecisionCoreAgent,
         )
 
-        return AudienceSupervisorGraph(
+        return AutonomousDecisionCoreAgent(
             orchestrator_factory=factory,
         )
 

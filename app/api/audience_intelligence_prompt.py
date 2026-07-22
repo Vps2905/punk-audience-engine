@@ -101,12 +101,46 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     lines.append("## Prompt understanding")
     lines.append("")
     lines.append(f"Filter mode used: {filter_report.get('filter_mode')}")
+
+    fulfillment = filter_report.get('fulfillment_status')
+    if fulfillment:
+        lines.append(f"Fulfillment status: {fulfillment}")
+
     lines.append(f"Locations detected: {', '.join(filter_report.get('locations_detected', []) or ['none'])}")
+
+    if filter_report.get('matched_requested_locations'):
+        lines.append(f"Matched locations: {', '.join(filter_report.get('matched_requested_locations', []))}")
+    if filter_report.get('missing_requested_locations'):
+        lines.append(f"Missing locations: {', '.join(filter_report.get('missing_requested_locations', []))}")
+
+    quality = filter_report.get('quality_intent')
+    if quality:
+        lines.append(f"Requested quality: {quality}")
+
+    q_report = filter_report.get('quality_policy_report')
+    if q_report:
+        lines.append(f"Quality policy: {q_report.get('quality_policy_status', 'not_requested')}")
+        if q_report.get('quality_policy_status') != 'not_requested':
+            lines.append(f"Quality-qualified candidates: {q_report.get('quality_candidates_after', 0)}")
+            lines.append(f"Candidates excluded below requested quality: {q_report.get('quality_excluded_count', 0)}")
+
+            loc_meeting = q_report.get('locations_meeting_quality', [])
+            if loc_meeting:
+                lines.append(f"Locations meeting requested quality: {', '.join(loc_meeting)}")
+
+            loc_missing = q_report.get('locations_missing_quality', [])
+            if loc_missing:
+                lines.append(f"Locations unable to meet requested quality: {', '.join(loc_missing)}")
+
     lines.append(f"POI terms detected: {', '.join(filter_report.get('poi_terms_detected', []) or ['none'])}")
     lines.append(f"Dayparts detected: {', '.join(filter_report.get('dayparts_detected', []) or ['none'])}")
     lines.append("")
 
     filter_mode_for_safety = str(filter_report.get("filter_mode") or "")
+    terminal_safety_modes = {
+        "privacy_identifier_request_blocked",
+        "export_action_requires_existing_audience",
+    }
     if filter_mode_for_safety == "privacy_identifier_request_blocked":
         lines.append("## Safety decision")
         lines.append("")
@@ -127,7 +161,11 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     filter_report = result.get("prompt_filter_report", {}) or {}
     filter_mode = str(filter_report.get("filter_mode") or "")
 
-    if filter_mode and filter_mode != "location+poi+daypart":
+    if (
+        filter_mode
+        and filter_mode != "location+poi+daypart"
+        and filter_mode not in terminal_safety_modes
+    ):
         lines.append("## Match note")
         lines.append("")
         lines.append(
@@ -198,7 +236,12 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
         lines.append("## Created approval-gated audiences")
         lines.append("")
 
-        if audience_count > 0:
+        if filter_mode in terminal_safety_modes:
+            lines.append(
+                "No audience selection or preparation was attempted because "
+                "this request was resolved by the terminal safety decision."
+            )
+        elif audience_count > 0:
             lines.append(
                 "No local audience file was created. "
                 "Approval-gated candidates are stored in "
@@ -239,11 +282,27 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
         safe_export.get("approval_status") or ""
     )
 
-    if approval_status == "blocked_no_safe_exact_match":
+    if approval_status == "blocked_privacy_identifier_request":
+        lines.append(
+            "The raw-identifier request was blocked by the privacy guardrail. "
+            "No audience ranking, preparation, or export was attempted."
+        )
+    elif approval_status == "blocked_export_action_requires_existing_audience":
+        lines.append(
+            "The export action was blocked because no existing approved "
+            "audience was supplied. No new audience ranking, preparation, "
+            "or export was attempted."
+        )
+    elif approval_status == "blocked_no_safe_exact_match":
         lines.append(
             "No audience candidate was created because no exact "
             "privacy-safe cohort matched the requested location, "
             "category, and daypart."
+        )
+    elif approval_status == "blocked_requested_quality_unmet":
+        lines.append(
+            "Exact privacy-safe cohorts were available, but none met the requested "
+            "quality requirement."
         )
     elif approval_status == "blocked_v2_failure":
         lines.append(
@@ -588,5 +647,4 @@ def audience_prompt_ui() -> str:
 </body>
 </html>
 """
-
 
