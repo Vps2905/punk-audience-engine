@@ -153,7 +153,10 @@ def test_orchestrator_source_requires_safe_path(tmp_path: Path):
 
 from unittest.mock import patch
 
-def test_quality_qualified_cohorts_persistence_and_lookalikes(tmp_path: Path):
+def test_quality_qualified_cohorts_persistence_and_lookalikes(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ENABLE_LLM_INTENT", "false")
+    monkeypatch.setenv("LLM_INTENT_MODEL_CHAIN", "")
+
     agent = AudienceIntelligenceOrchestratorAgent()
 
     top_cohorts = pd.DataFrame([
@@ -165,6 +168,67 @@ def test_quality_qualified_cohorts_persistence_and_lookalikes(tmp_path: Path):
         {"cohort_id": "c1", "lookalike_id": "l1"},
         {"cohort_id": "c2", "lookalike_id": "l2"},
     ])
+
+    # Isolate this persistence unit test from the real
+    # V2 retrieval and semantic ranking flow. This test verifies
+    # quality persistence and lookalike filtering only.
+    def mock_select_from_v2(*args, **kwargs):
+        return (
+            top_cohorts.copy(),
+            {
+                "enabled": True,
+                "reason": "v2_ranked_safe_selection",
+                "rows": len(top_cohorts),
+                "block_export": False,
+                "downstream_export_enabled": True,
+                "quality_intent": "high",
+                "quality_policy_report": {
+                    "quality_intent": "high",
+                    "quality_policy_status": (
+                        "pending_final_quality_evaluation"
+                    ),
+                    "quality_candidates_before": len(
+                        top_cohorts
+                    ),
+                    "quality_candidates_after": len(
+                        top_cohorts
+                    ),
+                    "quality_excluded_count": 0,
+                },
+                "coverage_status": "complete",
+                "fulfillment_status": "complete",
+                "missing_requested_locations": [],
+                "matched_requested_locations": [
+                    "montreal"
+                ],
+                "filter_mode": "location+poi",
+            },
+        )
+
+    monkeypatch.setattr(
+        agent,
+        "_select_cohorts_from_v2_ranked",
+        mock_select_from_v2,
+    )
+
+    # This test verifies post-management quality persistence,
+    # not production synthetic privacy enforcement.
+    def mock_synthetic_generate(self, *args, **kwargs):
+        return {
+            "status": "completed",
+            "engine_used": "DPAggregateCohortSynthesizer",
+            "synthetic_rows": len(top_cohorts),
+            "privacy_budget_recorded": True,
+            "outputs": {},
+        }
+
+    monkeypatch.setattr(
+        (
+            "app.agents.audience_intelligence_orchestrator_agent."
+            "SyntheticEngineAgent.generate"
+        ),
+        mock_synthetic_generate,
+    )
 
     # Mock embedding and cohort management to just return our top_cohorts and lookalikes
     def mock_run_management(*args, **kwargs):
@@ -203,7 +267,7 @@ def test_quality_qualified_cohorts_persistence_and_lookalikes(tmp_path: Path):
                 sample_safe_cohorts().to_csv(dummy_path, index=False)
 
                 result = agent.run(
-                    prompt="high quality montreal audience",
+                    prompt="high quality montreal restaurant audience",
                     output_root=tmp_path,
                     source="safe_artifact",
                     safe_cohort_path=dummy_path,

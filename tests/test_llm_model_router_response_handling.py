@@ -166,3 +166,97 @@ def test_validator_json_error_is_classified_as_invalid_json(
     assert attempts[0]["error_message"] == (
         "Model output was not valid JSON."
     )
+
+
+
+def test_direct_gemini_runtime_uses_google_endpoint(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "GEMINI_API_KEY",
+        "gemini-test-key",
+    )
+    monkeypatch.delenv(
+        "GEMINI_BASE_URL",
+        raising=False,
+    )
+
+    service = LLMModelRouterService()
+
+    runtime = service._resolve_runtime(
+        target=LLMModelTarget(
+            provider="gemini",
+            model="gemini-3.5-flash-lite",
+        ),
+        primary_provider="gemini",
+        primary_api_key="legacy-generic-key",
+        primary_base_url=(
+            "https://openrouter.ai/api/v1/chat/completions"
+        ),
+    )
+
+    assert runtime["api_key"] == "gemini-test-key"
+    assert runtime["base_url"] == (
+        "https://generativelanguage.googleapis.com/"
+        "v1beta/openai/chat/completions"
+    )
+
+
+def test_direct_gemini_accepts_markdown_fenced_json(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "LLM_INTENT_MODEL_CHAIN",
+        "",
+    )
+    monkeypatch.setenv(
+        "LLM_ROUTER_MAX_ATTEMPTS_PER_MODEL",
+        "1",
+    )
+    monkeypatch.setenv(
+        "GEMINI_API_KEY",
+        "gemini-test-key",
+    )
+    monkeypatch.setenv(
+        "GEMINI_BASE_URL",
+        "https://example.invalid/chat",
+    )
+
+    service = LLMModelRouterService()
+
+    monkeypatch.setattr(
+        service,
+        "_invoke_target",
+        lambda **kwargs: (
+            "```json\n"
+            "{\"locations\":[\"Montreal\"],"
+            "\"quality_intent\":\"high-quality\"}\n"
+            "```"
+        ),
+    )
+
+    result = service.route(
+        messages=[
+            {
+                "role": "user",
+                "content": "Return JSON.",
+            }
+        ],
+        primary_provider="gemini",
+        primary_model="gemini-3.5-flash-lite",
+        primary_api_key="",
+        primary_base_url="",
+        timeout_seconds=1,
+        max_tokens=100,
+        validator=json.loads,
+    )
+
+    assert result["validated"] == {
+        "locations": ["Montreal"],
+        "quality_intent": "high-quality",
+    }
+    assert result["telemetry"]["llm_used"] is True
+    assert result["telemetry"]["provider_used"] == "gemini"
+    assert result["telemetry"]["model_used"] == (
+        "gemini-3.5-flash-lite"
+    )

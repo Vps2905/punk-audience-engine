@@ -148,6 +148,10 @@ class LLMModelRouterService:
                         timeout_seconds=timeout_seconds,
                         max_tokens=max_tokens,
                     )
+                    content = self._normalize_json_content(
+                        content
+                    )
+
                     try:
                         validated = validator(content)
                     except LLMResponseValidationError:
@@ -397,6 +401,29 @@ class LLMModelRouterService:
                 or os.getenv("OPENROUTER_BASE_URL", "")
                 or "https://openrouter.ai/api/v1/chat/completions"
             ).strip()
+        elif provider == "gemini":
+            api_key = (
+                os.getenv("GEMINI_API_KEY", "")
+                or api_key
+                or os.getenv("LLM_INTENT_API_KEY", "")
+            ).strip()
+
+            configured_gemini_url = os.getenv(
+                "GEMINI_BASE_URL",
+                "",
+            ).strip()
+
+            if configured_gemini_url:
+                base_url = configured_gemini_url
+            elif (
+                "generativelanguage.googleapis.com"
+                not in str(base_url or "")
+            ):
+                base_url = (
+                    "https://generativelanguage.googleapis.com/"
+                    "v1beta/openai/chat/completions"
+                )
+
         elif provider == "openai":
             api_key = (
                 api_key
@@ -423,6 +450,27 @@ class LLMModelRouterService:
             "base_url": base_url,
         }
 
+    @staticmethod
+    def _normalize_json_content(content: str) -> str:
+        """Remove an optional whole-response Markdown JSON fence."""
+        normalized = str(content or "").strip()
+
+        if not normalized.startswith("```"):
+            return normalized
+
+        lines = normalized.splitlines()
+
+        if lines and lines[0].strip().lower() in {
+            "```",
+            "```json",
+        }:
+            lines = lines[1:]
+
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+
+        return "\n".join(lines).strip()
+
     def _invoke_target(
         self,
         *,
@@ -442,6 +490,12 @@ class LLMModelRouterService:
                 "type": "json_object",
             },
         }
+
+        if target.provider == "gemini":
+            # Gemini's OpenAI-compatible endpoint may return
+            # fenced JSON even when prompted for JSON. The router
+            # validates and normalizes that response separately.
+            payload.pop("response_format", None)
 
         if target.provider == "openrouter":
             reasoning_effort = os.getenv(
