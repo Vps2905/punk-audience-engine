@@ -13,14 +13,14 @@ class AutonomousExplanationService:
 
         if state.constraint_ledger:
             lines.append("## Explicit Constraints")
-            
+
             matched_locs = [m.lower() for m in (state.coverage_state.matched_locations if state.coverage_state else [])]
             for loc in state.constraint_ledger.locations:
                 status = loc.resolution_status
                 if status == "unresolved" and state.coverage_state and state.coverage_state.coverage_status == "complete":
                     if loc.normalized_value in matched_locs or any(loc.normalized_value in m for m in matched_locs):
                         status = "matched"
-                
+
                 lines.append(f"- explicit constraint: {loc.raw_text}")
                 lines.append(f"  - coverage result: {status}")
 

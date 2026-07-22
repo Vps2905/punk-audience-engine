@@ -18,7 +18,7 @@ def test_make_serializable():
         "tuple": (np.int32(1), "test"),
         "set": {np.float64(2.0)}
     }
-    
+
     clean = make_serializable(data)
     assert isinstance(clean["float"], float)
     assert isinstance(clean["int"], int)

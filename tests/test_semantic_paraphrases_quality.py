@@ -35,7 +35,7 @@ def test_propagation_and_evaluated_locations():
     # and completed coverage is not described as unresolved.
     agent = AutonomousDecisionCoreAgent()
     state = AutonomousDecisionState(request_id="test_req", original_prompt="Build audience for Montreal")
-    
+
     # Mock constraints
     state.constraint_ledger = ConstraintLedger(
         original_prompt="Build audience for Montreal",
@@ -45,10 +45,10 @@ def test_propagation_and_evaluated_locations():
         categories=[],
         dayparts=[],
     )
-    
+
     # Mock semantic decision
     state = agent._interpret_semantics(state)
-    
+
     # Mock tool results for assemble_world_state
     state.tool_results = {
         "prompt_filter_report": {
@@ -79,12 +79,12 @@ def test_propagation_and_evaluated_locations():
             "exported_cohorts": 0,
         },
     }
-    
+
     state = agent._assemble_world_state(state)
-    
+
     # Check evaluated_locations
     assert "montreal" in state.quality_state.evaluated_locations
-    
+
     # Check that unsupported location does not enter
     state.tool_results["prompt_filter_report"]["locations_detected"] = []
     state.tool_results["prompt_filter_report"]["matched_requested_locations"] = []
@@ -93,19 +93,19 @@ def test_propagation_and_evaluated_locations():
     state.tool_results["prompt_filter_report"]["v2_guided_selection"]["missing_requested_locations"] = ["montreal"]
     state.tool_results["prompt_filter_report"]["coverage_status"] = "blocked"
     state.tool_results["prompt_filter_report"]["v2_guided_selection"]["coverage_status"] = "blocked"
-    
+
     state2 = agent._assemble_world_state(state)
     assert "montreal" not in state2.quality_state.evaluated_locations
-    
+
 def test_explanation_formatting():
     from app.services.autonomous_explanation_service import AutonomousExplanationService
     from pathlib import Path
-    
+
     svc = AutonomousExplanationService()
-    
+
     agent = AutonomousDecisionCoreAgent()
     state = AutonomousDecisionState(request_id="test_req", original_prompt="Build audience for Montreal", status="completed")
-    
+
     # Mock constraints
     state.constraint_ledger = ConstraintLedger(
         original_prompt="Build audience for Montreal",
@@ -115,7 +115,7 @@ def test_explanation_formatting():
         categories=[],
         dayparts=[],
     )
-    
+
     # Mock coverage complete
     from app.models.autonomous_decision_state import CoverageState
     state.coverage_state = CoverageState(
@@ -123,11 +123,11 @@ def test_explanation_formatting():
         missing_locations=[],
         coverage_status="complete"
     )
-    
+
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         expl = svc.build_explanation(state, Path(tmpdir))
-        
+
         # Verify it does not say unresolved
         assert "coverage result: matched" in expl
         assert "(unresolved)" not in expl

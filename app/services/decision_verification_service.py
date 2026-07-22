@@ -63,7 +63,7 @@ class DecisionVerificationService:
         for dp_constraint in ledger.dayparts:
             dp_req = dp_constraint.normalized_value
             dropped_in_semantic = not any(dp_req in sm.lower() for sm in semantic.dayparts)
-            
+
             tool_results_contradict = False
             if state.tool_results:
                 v2gs = state.tool_results.get("v2_guided_selection", {})

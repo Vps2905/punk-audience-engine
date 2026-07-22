@@ -72,7 +72,7 @@ class ConstraintLedgerService:
             # Split by ' and ', ',', etc.
             raw_locs = re.split(r'\s+and\s+|,\s*', loc_str)
             locs = [l.strip() for l in raw_locs if l.strip() and l.strip()[0].isupper()]
-            
+
         if not locs:
             locs = fallback.get("locations_detected", [])
 
