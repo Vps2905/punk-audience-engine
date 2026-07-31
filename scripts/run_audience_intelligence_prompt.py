@@ -10,8 +10,76 @@ import pandas as pd
 from app.agents.audience_intelligence_orchestrator_agent import AudienceIntelligenceOrchestratorAgent
 
 
+def persist_business_summary(
+    result: dict,
+    business_summary: str,
+) -> str:
+    """
+    Persist the CLI business summary only when the run uses local storage.
+
+    Production runs may return durable postgres:// artifact references.
+    Those references must never be interpreted as local filesystem paths.
+    """
+    run_dir = str(result.get("run_dir") or "").strip()
+
+    if run_dir.startswith(("postgres://", "postgresql://")):
+        existing_reference = str(
+            result.get("business_summary_path") or ""
+        ).strip()
+
+        if existing_reference:
+            return existing_reference
+
+        final_summary_reference = str(
+            result.get("final_summary_path") or ""
+        ).strip()
+
+        if final_summary_reference:
+            separator = (
+                "&"
+                if "?" in final_summary_reference
+                else "?"
+            )
+            return (
+                f"{final_summary_reference}"
+                f"{separator}section=business_summary"
+            )
+
+        run_id = str(result.get("run_id") or "").strip()
+
+        if not run_id:
+            raise ValueError(
+                "Postgres-backed run is missing run_id"
+            )
+
+        return (
+            "postgres://audience_run_history.final_summary"
+            f"?run_id={run_id}"
+            "&section=business_summary"
+        )
+
+    if not run_dir:
+        raise ValueError("Audience run is missing run_dir")
+
+    business_summary_path = (
+        Path(run_dir) / "business_prompt_summary.md"
+    )
+    business_summary_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    business_summary_path.write_text(
+        business_summary,
+        encoding="utf-8",
+    )
+
+    return str(business_summary_path)
+
+
 def build_business_summary(result: Dict[str, Any]) -> str:
-    run_dir = Path(result["run_dir"])
+    run_dir = str(
+        result.get("run_dir") or ""
+    ).strip()
 
     export_outputs = result.get("safe_export", {}).get("outputs", {})
     cohorts_path = Path(export_outputs.get("safe_export_cohorts", ""))
@@ -29,8 +97,14 @@ def build_business_summary(result: Dict[str, Any]) -> str:
     lines.append(f"Source mode: {result.get('source_mode')}")
     lines.append(f"Source rows checked: {result.get('source_rows')}")
     lines.append(f"Prompt-selected cohorts: {result.get('prompt_selected_cohorts')}")
-    lines.append(f"Exported audiences: {result.get('safe_export', {}).get('exported_cohorts')}")
-    lines.append(f"Lookalike pairs: {result.get('safe_export', {}).get('exported_lookalike_pairs')}")
+    lines.append(
+        "Prepared safe export candidates: "
+        f"{result.get('safe_export', {}).get('exported_cohorts')}"
+    )
+    lines.append(
+        "Prepared lookalike pairs: "
+        f"{result.get('safe_export', {}).get('exported_lookalike_pairs')}"
+    )
     lines.append(f"Approval status: {result.get('safe_export', {}).get('approval_status')}")
     lines.append(f"Downstream export enabled: {result.get('safe_export', {}).get('downstream_export_enabled')}")
     lines.append("")
@@ -58,7 +132,7 @@ def build_business_summary(result: Dict[str, Any]) -> str:
             lines.append(f"- {warning}")
         lines.append("")
 
-    if cohorts_path.exists():
+    if cohorts_path.is_file():
         cohorts = pd.read_csv(cohorts_path)
 
         lines.append("## Created approval-gated audiences")
@@ -82,7 +156,7 @@ def build_business_summary(result: Dict[str, Any]) -> str:
             lines.append(f"   - Export status: {status}")
             lines.append("")
 
-    if lookalikes_path.exists():
+    if lookalikes_path.is_file():
         lookalikes = pd.read_csv(lookalikes_path)
         lines.append("## Lookalike package")
         lines.append("")
@@ -104,16 +178,51 @@ def build_business_summary(result: Dict[str, Any]) -> str:
     lines.append("## Final decision")
     lines.append("")
 
-    approval_status = result.get("safe_export", {}).get("approval_status")
-    downstream_enabled = result.get("safe_export", {}).get("downstream_export_enabled")
+    safe_export = result.get("safe_export") or {}
+    approval_status = safe_export.get("approval_status")
+    downstream_enabled = safe_export.get(
+        "downstream_export_enabled"
+    )
+    safe_export_status = safe_export.get("status")
+    prepared_cohorts = (
+        safe_export.get("exported_cohorts") or 0
+    )
 
-    if approval_status == "pending_approval" and downstream_enabled is False:
-        lines.append("Export package is ready for review, but downstream delivery is blocked until approval.")
+    if downstream_enabled is True:
+        lines.append(
+            "A privacy-safe export package is ready and "
+            "downstream delivery is enabled under the "
+            "current approval configuration."
+        )
+    elif approval_status == "pending_approval":
+        lines.append(
+            "Privacy-safe export candidates were prepared, "
+            "but downstream delivery is blocked until "
+            "explicit approval."
+        )
+    elif (
+        safe_export_status == "completed"
+        and prepared_cohorts
+    ):
+        lines.append(
+            "Privacy-safe export candidates were prepared, "
+            "but downstream delivery is blocked. "
+            f"Approval status: {approval_status or 'unknown'}."
+        )
     else:
-        lines.append("Export package is ready based on the current approval configuration.")
+        lines.append(
+            "No downstream export was performed. "
+            f"Approval status: {approval_status or 'unknown'}."
+        )
 
     lines.append("")
-    lines.append(f"Run folder: {run_dir}")
+
+    if run_dir.startswith(
+        ("postgres://", "postgresql://")
+    ):
+        lines.append(f"Run reference: {run_dir}")
+    else:
+        lines.append(f"Run folder: {run_dir}")
     lines.append("")
 
     return "\n".join(lines)
@@ -153,8 +262,10 @@ def main() -> int:
     )
 
     business_summary = build_business_summary(result)
-    business_summary_path = Path(result["run_dir"]) / "business_prompt_summary.md"
-    business_summary_path.write_text(business_summary)
+    business_summary_path = persist_business_summary(
+        result,
+        business_summary,
+    )
 
     print()
     print("=== BUSINESS SUMMARY ===")
