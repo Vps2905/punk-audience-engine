@@ -1,0 +1,45 @@
+{
+  "catalog_id": "reviewed-gold-cases-example",
+  "catalog_version": "immutable-example-v1",
+  "review_status": "approved",
+  "reviewed_by": "replace_with_named_reviewer",
+  "reviewed_at": "2026-07-30T12:00:00+00:00",
+  "cases": [
+    {
+      "case_id": "supported-example-001",
+      "query": "Find an evening restaurant audience in example city alpha.",
+      "language": "en",
+      "relevant_document_ids": [
+        "synthetic-feature-001"
+      ],
+      "hard_negative_document_ids": [
+        "synthetic-feature-002"
+      ],
+      "expected_locations": [
+        "example_city_alpha"
+      ],
+      "expected_categories": [
+        "restaurant"
+      ],
+      "expected_dayparts": [
+        "evening"
+      ],
+      "semantic_group_id": null,
+      "unsupported_location": false
+    },
+    {
+      "case_id": "unsupported-example-001",
+      "query": "Find restaurant visitors in an unsupported example city.",
+      "language": "en",
+      "relevant_document_ids": [],
+      "hard_negative_document_ids": [],
+      "expected_locations": [
+        "unsupported_example_city"
+      ],
+      "expected_categories": [],
+      "expected_dayparts": [],
+      "semantic_group_id": null,
+      "unsupported_location": true
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "catalog_id": "reviewed-safe-document-catalog-example",
+  "catalog_version": "immutable-example-v1",
+  "source_type": "curated_synthetic_features",
+  "source_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "privacy_status": "safe",
+  "rights_status": "synthetic_evaluation",
+  "contains_raw_identifiers": false,
+  "documents": [
+    {
+      "document_id": "synthetic-feature-001",
+      "text": "Synthetic aggregate traits for restaurant visits during the evening in example city alpha.",
+      "location": "example_city_alpha",
+      "category": "restaurant",
+      "daypart": "evening"
+    },
+    {
+      "document_id": "synthetic-feature-002",
+      "text": "Synthetic aggregate traits for cafe visits during the morning in example city beta.",
+      "location": "example_city_beta",
+      "category": "cafe",
+      "daypart": "morning"
+    }
+  ],
+  "lineage": {
+    "purpose": "schema_example_only",
+    "synthetic": true,
+    "production_coverage": false
+  }
+}

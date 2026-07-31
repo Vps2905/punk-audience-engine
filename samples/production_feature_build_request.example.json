@@ -1,0 +1,46 @@
+{
+  "activation_requested": false,
+  "batch_size": 256,
+  "max_features": 1000000,
+  "metadata_fields": [],
+  "model": {
+    "backend": "sentence_transformers",
+    "dimension": 384,
+    "document_prefix": "",
+    "model_name": "replace-with-approved-model",
+    "model_revision": "replace-with-immutable-revision",
+    "normalize_embeddings": true,
+    "query_prefix": ""
+  },
+  "requested_by": "feature_build_worker",
+  "source": {
+    "category_column": "primary_poi_type",
+    "cohort_size_column": "dp_noisy_count",
+    "data_format": "jsonl",
+    "data_use_mode": "offline_evaluation",
+    "dataset_id": "replace-with-dataset",
+    "daypart_column": "created_day_part",
+    "expected_row_count": 1,
+    "location_column": "location_name",
+    "max_object_bytes": 536870912,
+    "privacy_controls": [
+      "daily_contribution_bounding",
+      "k_anonymity",
+      "no_identifier_output"
+    ],
+    "privacy_policy_version": "replace-with-policy-version",
+    "privacy_status": "safe",
+    "privacy_window_column": "privacy_window",
+    "provider_id": "replace-with-provider",
+    "purpose": "offline_evaluation",
+    "rights_policy_id": "replace-with-rights-policy",
+    "rights_status": "offline_evaluation_only",
+    "schema_version": "replace-with-schema-version",
+    "source_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "source_latest_at": "2026-07-30T00:00:00+00:00",
+    "source_ref": "s3://replace-with-canonical-bucket/replace-with-object-key.jsonl",
+    "source_size_bytes": 1,
+    "source_version": "replace-with-exact-object-version",
+    "tenant_id": "replace-with-tenant"
+  }
+}

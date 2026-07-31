@@ -1,0 +1,5 @@
+{
+  "note": "This file is intentionally not registrable. Generate a signed-by-content report with scripts/run_production_embedding_benchmark.py. The registration boundary rejects hand-authored passed flags, incomplete metrics, weak thresholds, mismatched models, and modified report fingerprints.",
+  "passed": false,
+  "schema_version": "punk-embedding-benchmark-report-v1"
+}

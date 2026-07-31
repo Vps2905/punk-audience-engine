@@ -1,0 +1,101 @@
+{
+  "authoring_manifest": {
+    "builder_version": "production-dataset-builder-v1",
+    "case_catalog_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "document_catalog_fingerprints": [
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "review_status": "approved",
+    "reviewed_at": "2026-07-30T12:00:00+00:00",
+    "reviewed_by": "replace-with-named-reviewer",
+    "schema_version": "punk-embedding-benchmark-authoring-v1"
+  },
+  "benchmark_id": "replace-with-versioned-punk-evaluation-id",
+  "cases": [
+    {
+      "case_id": "supported-query-en",
+      "expected_categories": [
+        "restaurant"
+      ],
+      "expected_dayparts": [
+        "evening"
+      ],
+      "expected_locations": [
+        "city_alpha"
+      ],
+      "hard_negative_document_ids": [
+        "safe-feature-002"
+      ],
+      "language": "en",
+      "query": "Find evening restaurant visitors in City Alpha.",
+      "relevant_document_ids": [
+        "safe-feature-001"
+      ],
+      "semantic_group_id": "restaurant-evening-city-alpha",
+      "unsupported_location": false
+    },
+    {
+      "case_id": "supported-query-fr",
+      "expected_categories": [
+        "restaurant"
+      ],
+      "expected_dayparts": [
+        "evening"
+      ],
+      "expected_locations": [
+        "city_alpha"
+      ],
+      "hard_negative_document_ids": [
+        "safe-feature-002"
+      ],
+      "language": "fr",
+      "query": "Trouver les visiteurs de restaurants le soir à City Alpha.",
+      "relevant_document_ids": [
+        "safe-feature-001"
+      ],
+      "semantic_group_id": "restaurant-evening-city-alpha",
+      "unsupported_location": false
+    },
+    {
+      "case_id": "unsupported-location-query",
+      "expected_categories": [],
+      "expected_dayparts": [],
+      "expected_locations": [
+        "unsupported_city"
+      ],
+      "hard_negative_document_ids": [],
+      "language": "en",
+      "query": "Find restaurant visitors in Unsupported City.",
+      "relevant_document_ids": [],
+      "semantic_group_id": null,
+      "unsupported_location": true
+    }
+  ],
+  "contains_raw_identifiers": false,
+  "dataset_version": "replace-with-immutable-dataset-version",
+  "documents": [
+    {
+      "category": "restaurant",
+      "daypart": "evening",
+      "document_id": "safe-feature-001",
+      "location": "city_alpha",
+      "text": "location city alpha category restaurant daypart evening"
+    },
+    {
+      "category": "cafe",
+      "daypart": "morning",
+      "document_id": "safe-feature-002",
+      "location": "city_beta",
+      "text": "location city beta category cafe daypart morning"
+    },
+    {
+      "category": "retail",
+      "daypart": "afternoon",
+      "document_id": "safe-feature-003",
+      "location": "city_gamma",
+      "text": "location city gamma category retail daypart afternoon"
+    }
+  ],
+  "privacy_status": "safe",
+  "rights_status": "synthetic_evaluation"
+}
