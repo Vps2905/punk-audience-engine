@@ -1,0 +1,26 @@
+services:
+  module1-control-postgres:
+    image: postgres:18.4
+    container_name: punk-module1-control-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${MODULE1_CONTROL_DATABASE:-punk_provider_control}
+      POSTGRES_USER: ${MODULE1_CONTROL_ADMIN_USER:-punk_provider_admin}
+      POSTGRES_PASSWORD: ${MODULE1_CONTROL_PASSWORD:?Set MODULE1_CONTROL_PASSWORD}
+    ports:
+      - "127.0.0.1:${MODULE1_CONTROL_PORT:-55433}:5432"
+    volumes:
+      - punk-module1-control-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  punk-module1-control-data:
+    name: punk-module1-control-data

@@ -77,6 +77,12 @@ LOW_RISK_POI = {
     "barber_shop",
 }
 
+BLOCKED_SENSITIVE_UMBRELLA_POI = {
+    "health",
+    "healthcare",
+    "medical",
+}
+
 
 class SensitivePOIPrivacyRiskService:
     def assess(
@@ -143,6 +149,9 @@ class SensitivePOIPrivacyRiskService:
     def _classify_poi(self, poi: str) -> Dict[str, Any]:
         if not poi:
             return self._risk("unknown_review", 0.55, "review_required", ["unknown_poi_type"], "POI type is missing or unknown.")
+
+        if poi in BLOCKED_SENSITIVE_UMBRELLA_POI:
+            return self._risk("blocked_sensitive", 1.0, "block_export", ["sensitive_poi_umbrella_blocked"], "A broad health or medical POI category must fail closed.")
 
         if self._matches_any(poi, BLOCKED_SENSITIVE_POI):
             return self._risk("blocked_sensitive", 1.0, "block_export", ["sensitive_poi_blocked"], "Sensitive POI category must not be exported.")
@@ -213,7 +222,13 @@ class SensitivePOIPrivacyRiskService:
         poi_norm = self._norm(poi)
         for value in values:
             value_norm = self._norm(value)
-            if poi_norm == value_norm or value_norm in poi_norm or poi_norm in value_norm:
+            if poi_norm == value_norm:
+                return True
+            # Provider taxonomies can add qualifiers such as
+            # ``general_hospital`` or ``hospital_department``. Match complete
+            # taxonomy tokens, never arbitrary substrings: ``bar`` must not
+            # classify ``barber_shop`` as regulated.
+            if f"_{value_norm}_" in f"_{poi_norm}_":
                 return True
         return False
 

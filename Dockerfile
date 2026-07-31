@@ -33,5 +33,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # Database migration assets
 COPY migrations ./migrations
 COPY scripts/apply_database_migrations.py ./scripts/apply_database_migrations.py
+COPY scripts/run_provider_ingestion_worker.py ./scripts/run_provider_ingestion_worker.py
+COPY scripts/provider_distributed_control_plane_lambda.py ./scripts/provider_distributed_control_plane_lambda.py
+COPY scripts/provider_distributed_privacy_glue_job.py ./scripts/provider_distributed_privacy_glue_job.py
+COPY scripts/reconcile_provider_distributed_jobs.py ./scripts/reconcile_provider_distributed_jobs.py
+COPY scripts/register_provider_contract.py ./scripts/register_provider_contract.py
+COPY scripts/replay_provider_ingestion.py ./scripts/replay_provider_ingestion.py
+COPY scripts/inventory_historical_vector_snapshots.py ./scripts/inventory_historical_vector_snapshots.py
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

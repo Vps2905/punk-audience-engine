@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from app.services.ingestion_lineage_service import IngestionLineageService
 from app.services.privacy_ingestion_pipeline_service import (
     PrivacyIngestionConfig,
@@ -140,3 +142,23 @@ def test_privacy_ingestion_pipeline_validates_config(tmp_path: Path):
         assert "min_cohort_size must be >= 1" in str(exc)
     else:
         raise AssertionError("Expected config validation failure")
+
+
+def test_production_tokenization_rejects_legacy_public_salt(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("PRODUCTION_MODE", "true")
+    monkeypatch.delenv("AUDIENCE_TOKENIZATION_HMAC_KEY", raising=False)
+    service = PrivacyIngestionPipelineService(
+        database_url=f"sqlite:///{tmp_path / 'production-key.db'}"
+    )
+
+    with pytest.raises(RuntimeError, match="managed HMAC key"):
+        service.process_events(
+            _rows(),
+            config=PrivacyIngestionConfig(
+                min_cohort_size=2,
+                hash_salt="legacy-public-salt",
+            ),
+        )

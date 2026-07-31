@@ -85,3 +85,55 @@ def test_healthcare_prompt_blocks_even_when_no_selected_rows():
     assert report["prompt_risk"]["decision"] == "block_export"
     assert report["safe_to_export"] is False
     assert report["downstream_export_enabled"] is False
+
+
+def test_barber_shop_does_not_match_regulated_bar_category():
+    report = SensitivePOIPrivacyRiskService().assess(
+        prompt="Build a barber shop audience",
+        selected_cohorts=[
+            {
+                "audience_name": "Barber shop audience",
+                "location_name": "city",
+                "primary_poi_type": "barber_shop",
+                "created_day_part": "unknown",
+            }
+        ],
+    )
+
+    assert report["overall_decision"] == "allow_approval_gated_export"
+    assert report["review_required_count"] == 0
+    assert report["assessed_audiences"][0]["risk_level"] == "low"
+
+
+def test_qualified_sensitive_taxonomy_token_still_blocks():
+    report = SensitivePOIPrivacyRiskService().assess(
+        prompt="Build a general local audience",
+        selected_cohorts=[
+            {
+                "audience_name": "General hospital audience",
+                "location_name": "city",
+                "primary_poi_type": "general_hospital_department",
+                "created_day_part": "unknown",
+            }
+        ],
+    )
+
+    assert report["overall_decision"] == "block_export"
+    assert report["blocked_sensitive_count"] == 1
+
+
+def test_broad_health_taxonomy_fails_closed():
+    report = SensitivePOIPrivacyRiskService().assess(
+        prompt="Build a local audience",
+        selected_cohorts=[
+            {
+                "audience_name": "Broad health taxonomy",
+                "location_name": "city",
+                "primary_poi_type": "health",
+                "created_day_part": "unknown",
+            }
+        ],
+    )
+
+    assert report["overall_decision"] == "block_export"
+    assert report["blocked_sensitive_count"] == 1

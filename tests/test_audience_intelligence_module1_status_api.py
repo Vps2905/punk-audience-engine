@@ -5,6 +5,7 @@ from app.main import app
 
 def test_module_1_status_requires_api_key(monkeypatch):
     monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
+    monkeypatch.setenv("REQUIRE_AUDIENCE_API_KEY", "true")
     client = TestClient(app)
 
     response = client.get("/api/audience-intelligence/module-1/status")
@@ -14,6 +15,7 @@ def test_module_1_status_requires_api_key(monkeypatch):
 
 def test_module_1_status_returns_safe_readiness_summary(monkeypatch):
     monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
+    monkeypatch.setenv("REQUIRE_AUDIENCE_API_KEY", "true")
     monkeypatch.setenv("AUDIENCE_INGESTION_DATABASE_URL", "postgresql://secret-user:secret-pass@example/db")
     monkeypatch.setenv("AUDIENCE_LINEAGE_DATABASE_URL", "postgresql://secret-user:secret-pass@example/db")
     monkeypatch.setenv("AUDIENCE_PRIVACY_BUDGET_DATABASE_URL", "postgresql://secret-user:secret-pass@example/db")
@@ -29,11 +31,17 @@ def test_module_1_status_returns_safe_readiness_summary(monkeypatch):
     payload = response.json()
 
     assert payload["module"] == "module_1_ingestion_privacy_layer"
-    assert payload["status"] == "ready_for_preproduction_review"
+    assert payload["status"] == "disabled_pending_deployment"
     assert payload["api_key_configured"] is True
     assert payload["database_configured"] is True
 
-    assert payload["privacy_controls"]["salted_hashing"] is True
+    assert payload["privacy_controls"]["hmac_sha256_tokenization"] is True
+    assert payload["privacy_controls"][
+        "entity_disjoint_privacy_partitions"
+    ] is True
+    assert payload["privacy_controls"][
+        "deletion_and_opt_out_propagation"
+    ] is True
     assert payload["privacy_controls"]["contribution_bounding"] is True
     assert payload["privacy_controls"]["privacy_budget_ledger"] is True
     assert payload["privacy_controls"]["lineage_logging"] is True

@@ -1,0 +1,40 @@
+{
+  "tenant_id": "tenant_identifier",
+  "provider_id": "provider_identifier",
+  "dataset_id": "dataset_identifier",
+  "schema_version": "v1",
+  "data_format": "csv",
+  "connection_type": "s3",
+  "allowed_bucket": "provider-landing-bucket",
+  "allowed_prefix": "provider/dataset/",
+  "entity_id_column": "entity_id",
+  "timestamp_column": "event_time",
+  "cohort_columns": [
+    "coarse_location",
+    "normalized_category",
+    "time_window"
+  ],
+  "min_cohort_size": 1000,
+  "epsilon": 1.0,
+  "max_cumulative_epsilon": 5.0,
+  "delta": 0.00001,
+  "sensitivity": 1.0,
+  "mechanism": "gaussian",
+  "max_object_bytes": 536870912,
+  "max_rows_per_object": 5000000,
+  "execution_mode": "auto",
+  "max_in_process_object_bytes": 16777216,
+  "max_in_process_rows": 100000,
+  "privacy_window_minutes": 1440,
+  "distributed_partition_strategy": "entity_hash_v1",
+  "require_complete_privacy_partitions": true,
+  "raw_retention_days": 2,
+  "require_checksum": true,
+  "require_encryption": true,
+  "rights_policy_id": "audience_intelligence_default",
+  "allowed_purposes": [
+    "audience_intelligence"
+  ],
+  "expected_delivery_interval_minutes": 1440,
+  "freshness_sla_minutes": 2880
+}

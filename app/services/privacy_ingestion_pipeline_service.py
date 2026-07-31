@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import base64
 import math
 import os
 import random
@@ -51,6 +53,8 @@ class PrivacyIngestionConfig:
     sensitivity: float = 1.0
     mechanism: str = "gaussian"
     hash_salt: Optional[str] = None
+    hash_key: Optional[str] = None
+    suppressed_token_digests: Sequence[str] = ()
     random_seed: Optional[int] = None
 
 
@@ -162,21 +166,49 @@ class PrivacyIngestionPipelineService:
             }
 
         hashed_events = self._hash_entity_ids(df, config)
+        before_suppression = len(hashed_events)
+        suppressed = {
+            str(value).strip().lower()
+            for value in config.suppressed_token_digests
+            if str(value).strip()
+        }
+        if suppressed:
+            hashed_events = [
+                row
+                for row in hashed_events
+                if hashlib.sha256(
+                    str(row[config.entity_id_column]).encode("utf-8")
+                ).hexdigest()
+                not in suppressed
+            ]
+        suppressed_rows = before_suppression - len(hashed_events)
 
         self._record_lineage(
             job_id=job_id,
             run_id=run_id,
             stage="hashing",
-            transformation="sha256_salted_entity_hash",
+            transformation="hmac_sha256_entity_tokenization",
             input_rows=input_rows,
             output_rows=len(hashed_events),
-            dropped_rows=0,
+            dropped_rows=suppressed_rows,
             actor=actor,
             details={
                 "raw_entity_id_removed": True,
-                "hash_algorithm": "sha256",
+                "hash_algorithm": "hmac-sha256",
+                "suppression_enforced": True,
+                "suppressed_rows": suppressed_rows,
             },
         )
+
+        if not hashed_events:
+            reason = "All input rows were removed by data-rights suppression."
+            self._jobs.mark_blocked(job_id=job_id, reason=reason)
+            return {
+                "status": "blocked",
+                "reason": reason,
+                "job_id": job_id,
+                "safe_feature_rows": [],
+            }
 
         bounded = self._bounding.bound_events(
             hashed_events,
@@ -321,7 +353,8 @@ class PrivacyIngestionPipelineService:
             "safe_feature_rows_count": len(dp_rows),
             "safe_feature_rows": dp_rows,
             "privacy_controls": [
-                "salted_hashing",
+                "hmac_sha256_tokenization",
+                "data_rights_suppression",
                 "contribution_bounding",
                 "k_anonymity",
                 "differential_privacy_noise",
@@ -339,14 +372,36 @@ class PrivacyIngestionPipelineService:
         df: pd.DataFrame,
         config: PrivacyIngestionConfig,
     ) -> List[Dict[str, Any]]:
-        salt = config.hash_salt or os.getenv("AUDIENCE_HASH_SALT") or "dev_only_change_me"
+        production = str(os.getenv("PRODUCTION_MODE") or "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        } or str(os.getenv("APP_ENV") or "").lower() == "production"
+        managed_key = (
+            config.hash_key
+            or os.getenv("AUDIENCE_TOKENIZATION_HMAC_KEY")
+        )
+        if production and not managed_key:
+            raise RuntimeError(
+                "Production tokenization requires managed HMAC key material."
+            )
+        key = (
+            managed_key
+            or config.hash_salt
+            or os.getenv("AUDIENCE_HASH_SALT")
+        )
+        key = key or "dev_only_change_me"
 
         working = df.copy()
 
         def _hash(value: Any) -> str:
-            raw = str(value).encode("utf-8")
-            salted = salt.encode("utf-8") + b":" + raw
-            return hashlib.sha256(salted).hexdigest()
+            digest = hmac.new(
+                str(key).encode("utf-8"),
+                str(value).encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+            return base64.b64encode(digest).decode("ascii")
 
         working[config.entity_id_column] = working[config.entity_id_column].map(_hash)
 
@@ -453,3 +508,11 @@ class PrivacyIngestionPipelineService:
 
         if not config.cohort_columns:
             raise ValueError("cohort_columns is required")
+        for digest in config.suppressed_token_digests:
+            normalized = str(digest or "").strip().lower()
+            if len(normalized) != 64 or any(
+                value not in "0123456789abcdef" for value in normalized
+            ):
+                raise ValueError(
+                    "suppressed_token_digests must contain SHA-256 digests"
+                )

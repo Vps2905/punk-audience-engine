@@ -1,0 +1,131 @@
+{
+  "Comment": "Privacy-safe distributed provider object processing",
+  "StartAt": "Prepare",
+  "States": {
+    "Prepare": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ControlPlaneLambdaArn}",
+        "Payload": {
+          "action": "prepare",
+          "request.$": "$"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 4
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PrepareFailed"
+        }
+      ],
+      "Next": "ReadyForGlue"
+    },
+    "ReadyForGlue": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.ready",
+          "BooleanEquals": true,
+          "Next": "RunGluePrivacyJob"
+        }
+      ],
+      "Default": "PolicyBlocked"
+    },
+    "RunGluePrivacyJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${GlueJobName}",
+        "Arguments.$": "$.glue_arguments"
+      },
+      "ResultPath": "$.glue_receipt",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.glue_error",
+          "Next": "FinalizeFailure"
+        }
+      ],
+      "Next": "FinalizeSuccess"
+    },
+    "FinalizeSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ControlPlaneLambdaArn}",
+        "Payload": {
+          "action": "finalize",
+          "request.$": "$.request",
+          "plan.$": "$.plan",
+          "privacy_release_id.$": "$.privacy_release.release_id"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 6
+        }
+      ],
+      "End": true
+    },
+    "FinalizeFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ControlPlaneLambdaArn}",
+        "Payload": {
+          "action": "fail",
+          "request.$": "$.request",
+          "plan.$": "$.plan",
+          "privacy_release_id.$": "$.privacy_release.release_id"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 6
+        }
+      ],
+      "End": true
+    },
+    "PolicyBlocked": {
+      "Type": "Succeed"
+    },
+    "PrepareFailed": {
+      "Type": "Fail",
+      "Error": "DistributedPrepareFailed",
+      "Cause": "The distributed control-plane preparation failed closed."
+    }
+  }
+}

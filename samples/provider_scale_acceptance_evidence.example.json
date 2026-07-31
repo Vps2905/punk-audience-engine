@@ -1,0 +1,21 @@
+{
+  "evidence_id": "preproduction-2026-07-31-run-001",
+  "environment": "preproduction",
+  "total_events": 1000000000,
+  "duration_seconds": 86400,
+  "average_events_per_second": 11575,
+  "peak_events_per_second": 35000,
+  "queue_age_p99_seconds": 600,
+  "end_to_end_p99_seconds": 3600,
+  "rights_propagation_seconds": 10000,
+  "cost_usd": 500,
+  "duplicate_side_effect_count": 0,
+  "raw_identifier_output_count": 0,
+  "privacy_partition_violation_count": 0,
+  "unrecovered_failure_count": 0,
+  "canonical_checksum_failure_count": 0,
+  "stale_data_activated_count": 0,
+  "source_replay_verified": true,
+  "worker_restart_verified": true,
+  "backup_restore_verified": true
+}

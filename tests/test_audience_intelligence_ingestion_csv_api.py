@@ -40,7 +40,7 @@ def test_audience_intelligence_csv_ingest_returns_safe_features(monkeypatch, tmp
     assert payload["aggregated_rows"] == 1
     assert payload["safe_feature_rows_count"] == 1
     assert "entity_id" not in payload["safe_feature_rows"][0]
-    assert "salted_hashing" in payload["privacy_controls"]
+    assert "hmac_sha256_tokenization" in payload["privacy_controls"]
     assert "k_anonymity" in payload["privacy_controls"]
 
 

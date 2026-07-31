@@ -6,14 +6,24 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS_DIR = ROOT / "migrations"
+OPERATOR_ONLY_MIGRATIONS = {
+    "0003_provider_ingestion_gateway.sql",
+    "0004_versioned_audience_features_pgvector.sql",
+    "0005_punk_ai_audience_proposal_ledger.sql",
+    "0006_provider_distributed_scale_dispatch.sql",
+    "0007_provider_distributed_privacy_releases.sql",
+    "0008_production_feature_build_registry.sql",
+    "0009_provider_privacy_windows_and_rights.sql",
+    "0010_provider_control_plane_rls.sql",
+}
 
 
 def database_url() -> str:
     value = (
-        os.getenv("AUDIENCE_HISTORY_DATABASE_URL")
+        os.getenv("PROVIDER_INGESTION_DATABASE_URL")
+        or os.getenv("AUDIENCE_HISTORY_DATABASE_URL")
         or os.getenv("ECHO_DATABASE_URL")
         or os.getenv("DATABASE_URL")
         or os.getenv("POSTGRES_URL")
@@ -37,10 +47,16 @@ def database_url() -> str:
     return value
 
 
-def apply_migrations() -> None:
-    files = sorted(
-        MIGRATIONS_DIR.glob("*.sql")
+def migration_files() -> list[Path]:
+    return sorted(
+        migration
+        for migration in MIGRATIONS_DIR.glob("*.sql")
+        if migration.name not in OPERATOR_ONLY_MIGRATIONS
     )
+
+
+def apply_migrations() -> None:
+    files = migration_files()
 
     if not files:
         print("NO_MIGRATIONS_FOUND")

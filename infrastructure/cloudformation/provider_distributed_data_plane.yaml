@@ -1,0 +1,358 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Punk Audience Intelligence distributed provider privacy data plane.
+  Deploy only after migrations 0006 and 0007 are operator-approved.
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+  GlueScriptKey:
+    Type: String
+  GlueAppPackageKey:
+    Type: String
+  ControlPlaneLambdaCodeKey:
+    Type: String
+  StateMachineDefinitionKey:
+    Type: String
+  ProviderLandingBucketArn:
+    Type: String
+  CanonicalBucketArn:
+    Type: String
+  DataKmsKeyArn:
+    Type: String
+  DataKmsKeyId:
+    Type: String
+  DatabaseSecretArn:
+    Type: String
+  TokenizationSecretArn:
+    Type: String
+  DpSeedSecretArn:
+    Type: String
+  GlueVpcConnectionName:
+    Type: String
+  LambdaSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  LambdaSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  GlueWorkerType:
+    Type: String
+    Default: G.2X
+    AllowedValues:
+      - G.1X
+      - G.2X
+      - G.4X
+      - G.8X
+      - G.12X
+      - G.16X
+  GlueWorkerCount:
+    Type: Number
+    Default: 10
+    MinValue: 2
+    MaxValue: 299
+
+Resources:
+  RawStagingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref DataKmsKeyId
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteRawDistributedStaging
+            Status: Enabled
+            Prefix: provider-distributed-staging/
+            ExpirationInDays: 2
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 2
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  ControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ProviderDistributedControlPlane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AssignPrivateIpAddresses
+                  - ec2:UnassignPrivateIpAddresses
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecretArn
+              - Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObjectVersion
+                Resource: !Sub "${ProviderLandingBucketArn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${RawStagingBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${CanonicalBucketArn}/*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref DataKmsKeyArn
+
+  ControlPlaneFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: scripts.provider_distributed_control_plane_lambda.lambda_handler
+      Role: !GetAtt ControlPlaneRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 50
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ControlPlaneLambdaCodeKey
+      Environment:
+        Variables:
+          PROVIDER_INGESTION_DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          PROVIDER_DISTRIBUTED_STAGING_BUCKET: !Ref RawStagingBucket
+          PROVIDER_DISTRIBUTED_STAGING_PREFIX: provider-distributed-staging/
+          PROVIDER_DISTRIBUTED_STAGING_ENCRYPTION: aws:kms
+          PROVIDER_DISTRIBUTED_STAGING_KMS_KEY_ID: !Ref DataKmsKeyId
+          PROVIDER_DISTRIBUTED_RECONCILIATION_STALE_SECONDS: "900"
+      VpcConfig:
+        SecurityGroupIds: !Ref LambdaSecurityGroupIds
+        SubnetIds: !Ref LambdaSubnetIds
+
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ProviderDistributedPrivacyJob
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RawStagingBucket.Arn
+                  - !Sub "${RawStagingBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${ArtifactBucket}/${GlueScriptKey}"
+                  - !Sub "arn:${AWS::Partition}:s3:::${ArtifactBucket}/${GlueAppPackageKey}"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource:
+                  - !Sub "${CanonicalBucketArn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Ref CanonicalBucketArn
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DatabaseSecretArn
+                  - !Ref TokenizationSecretArn
+                  - !Ref DpSeedSecretArn
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref DataKmsKeyArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:AssociateKmsKey
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  DistributedPrivacyGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: punk-provider-distributed-privacy
+      Role: !GetAtt GlueJobRole.Arn
+      Connections:
+        Connections:
+          - !Ref GlueVpcConnectionName
+      GlueVersion: "4.0"
+      WorkerType: !Ref GlueWorkerType
+      NumberOfWorkers: !Ref GlueWorkerCount
+      ExecutionProperty:
+        MaxConcurrentRuns: 50
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://${ArtifactBucket}/${GlueScriptKey}"
+      DefaultArguments:
+        "--extra-py-files": !Sub "s3://${ArtifactBucket}/${GlueAppPackageKey}"
+        "--tokenization_secret_arn": !Ref TokenizationSecretArn
+        "--dp_seed_secret_arn": !Ref DpSeedSecretArn
+        "--suppression_database_secret_arn": !Ref DatabaseSecretArn
+        "--enable-auto-scaling": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--enable-metrics": "true"
+        "--enable-observability-metrics": "true"
+        "--enable-s3-parquet-optimized-committer": "true"
+        "--job-bookmark-option": "job-bookmark-disable"
+      MaxRetries: 0
+      Timeout: 2880
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ProviderDistributedWorkflow
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ControlPlaneFunction.Arn
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                  - glue:GetJobRun
+                  - glue:GetJobRuns
+                  - glue:BatchStopJobRun
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+
+  DistributedProviderStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  DistributedProviderStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StateMachineRole.Arn
+      DefinitionS3Location:
+        Bucket: !Ref ArtifactBucket
+        Key: !Ref StateMachineDefinitionKey
+      DefinitionSubstitutions:
+        ControlPlaneLambdaArn: !GetAtt ControlPlaneFunction.Arn
+        GlueJobName: !Ref DistributedPrivacyGlueJob
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt DistributedProviderStateMachineLogGroup.Arn
+        IncludeExecutionData: false
+        Level: ERROR
+      TracingConfiguration:
+        Enabled: true
+
+  DistributedReconciliationSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Reconcile distributed executions with missed callbacks
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ControlPlaneFunction.Arn
+          Id: ProviderDistributedReconciliation
+          Input: '{"action":"reconcile"}'
+
+  ReconciliationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ControlPlaneFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DistributedReconciliationSchedule.Arn
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref DistributedProviderStateMachine
+  ControlPlaneLambdaArn:
+    Value: !GetAtt ControlPlaneFunction.Arn
+  GlueJobName:
+    Value: !Ref DistributedPrivacyGlueJob
+  StagingBucket:
+    Value: !Ref RawStagingBucket
