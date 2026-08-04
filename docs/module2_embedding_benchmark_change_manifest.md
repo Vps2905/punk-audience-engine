@@ -47,3 +47,13 @@ benchmark policy.
 - Approved models and published feature artifacts remain immutable.
 - Tenant row-level security and least-privilege reader/writer roles remain in
   force.
+
+## Retrieval-depth feasibility guard
+
+The production runner and approval validator now derive the theoretical
+maximum standard `precision_at_k` from the immutable reviewed labels before
+model inference or registration. An incompatible dataset and retrieval depth
+fail closed instead of consuming model resources for a benchmark that cannot
+meet policy. Single-relevant-document catalogs may be used for explicit top-one
+engineering comparison, but multi-result production approval requires reviewed
+multi-relevance labels for the intended retrieval depth.

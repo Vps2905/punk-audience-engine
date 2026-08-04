@@ -57,6 +57,34 @@ REQUIRED_BENCHMARK_COVERAGE = {
 }
 
 
+def theoretical_maximum_precision_at_k(
+    dataset: EmbeddingBenchmarkDataset,
+    *,
+    top_k: int,
+) -> float:
+    """Return the best standard precision@k the labels can ever achieve."""
+
+    k = int(top_k)
+    if not 1 <= k <= len(dataset.documents):
+        raise ValueError(
+            "top_k must be between 1 and the benchmark document count."
+        )
+    supported = [
+        value
+        for value in dataset.cases
+        if not value.unsupported_location
+    ]
+    if not supported:
+        return 0.0
+    return float(
+        sum(
+            min(len(set(value.relevant_document_ids)), k) / k
+            for value in supported
+        )
+        / len(supported)
+    )
+
+
 def benchmark_dataset_coverage(
     dataset: EmbeddingBenchmarkDataset,
 ) -> dict[str, int]:
@@ -277,6 +305,19 @@ class ProductionEmbeddingBenchmarkService:
         thresholds = self._policy.resolve_thresholds(
             threshold_overrides
         )
+        theoretical_precision = theoretical_maximum_precision_at_k(
+            dataset,
+            top_k=int(top_k),
+        )
+        required_precision = float(thresholds["precision_at_k"])
+        if theoretical_precision + 1e-12 < required_precision:
+            raise ValueError(
+                "Benchmark dataset labels and top_k cannot satisfy the "
+                "production precision_at_k threshold: theoretical maximum "
+                f"is {theoretical_precision:.6f}, but policy requires "
+                f"{required_precision:.6f}. Reduce top_k or add reviewed "
+                "relevant documents per supported case."
+            )
 
         document_vectors = np.asarray(
             self._encoder.encode_documents(
@@ -377,6 +418,9 @@ class ProductionEmbeddingBenchmarkService:
                 "top_k": int(top_k),
                 "batch_size": int(batch_size),
                 "rejection_similarity_threshold": rejection_threshold,
+                "theoretical_maximum_precision_at_k": (
+                    theoretical_precision
+                ),
                 **coverage,
                 "languages": sorted(
                     {value.language for value in dataset.cases}
@@ -857,6 +901,39 @@ class ProductionEmbeddingBenchmarkReportValidator:
         if thresholds != safe["thresholds"]:
             raise ValueError(
                 "benchmark_report thresholds are not canonical."
+            )
+        try:
+            top_k = int(safe["evaluation"].get("top_k"))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "benchmark_report top_k is invalid."
+            ) from None
+        theoretical_precision = theoretical_maximum_precision_at_k(
+            dataset,
+            top_k=top_k,
+        )
+        observed_theoretical_precision = safe["evaluation"].get(
+            "theoretical_maximum_precision_at_k"
+        )
+        if (
+            not isinstance(observed_theoretical_precision, (int, float))
+            or not math.isfinite(float(observed_theoretical_precision))
+            or not math.isclose(
+                float(observed_theoretical_precision),
+                theoretical_precision,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError(
+                "benchmark_report theoretical precision evidence is invalid."
+            )
+        if theoretical_precision + 1e-12 < float(
+            thresholds["precision_at_k"]
+        ):
+            raise ValueError(
+                "benchmark_report dataset labels and top_k cannot satisfy "
+                "the production precision_at_k threshold."
             )
         expected_results = self._expected_threshold_results(
             metrics=safe["metrics"],

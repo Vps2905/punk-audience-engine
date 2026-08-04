@@ -127,6 +127,14 @@ def production_benchmark_dataset() -> EmbeddingBenchmarkDataset:
     )
 
 
+def single_relevant_benchmark_dataset() -> EmbeddingBenchmarkDataset:
+    payload = production_benchmark_dataset().to_dict()
+    for case in payload["cases"]:
+        if not case["unsupported_location"]:
+            case["relevant_document_ids"] = ["doc-000"]
+    return EmbeddingBenchmarkDataset.from_mapping(payload)
+
+
 def production_benchmark_report():
     ticks = iter(
         value / 1000.0
@@ -179,6 +187,76 @@ def test_benchmark_calculates_complete_production_evidence():
     assert report["metrics"]["multilingual_consistency"] == 1.0
     assert report["activation_or_export_performed"] is False
     assert report["raw_identifiers_read"] is False
+
+
+def test_benchmark_rejects_an_impossible_precision_top_k_before_inference():
+    with pytest.raises(
+        ValueError,
+        match="theoretical maximum",
+    ):
+        ProductionEmbeddingBenchmarkService(
+            encoder=ControlledEncoder(),
+            memory_mb_fn=lambda: 128.0,
+        ).evaluate(
+            dataset=single_relevant_benchmark_dataset(),
+            model=_model(),
+            top_k=10,
+            rejection_similarity_threshold=0.5,
+            cost_per_1000_queries_usd=0.0,
+        )
+
+
+def test_single_relevant_labels_can_run_as_an_explicit_top_one_benchmark():
+    dataset = single_relevant_benchmark_dataset()
+    report = ProductionEmbeddingBenchmarkService(
+        encoder=ControlledEncoder(),
+        memory_mb_fn=lambda: 128.0,
+    ).evaluate(
+        dataset=dataset,
+        model=_model(),
+        top_k=1,
+        rejection_similarity_threshold=0.5,
+        cost_per_1000_queries_usd=0.0,
+    )
+
+    assert report["passed"] is True
+    assert report["evaluation"]["top_k"] == 1
+    assert (
+        report["evaluation"][
+            "theoretical_maximum_precision_at_k"
+        ]
+        == 1.0
+    )
+    assert report["metrics"]["precision_at_k"] == 1.0
+    assert ProductionEmbeddingBenchmarkReportValidator().validate(
+        report,
+        model=_model(),
+        dataset=dataset,
+    )["passed"] is True
+
+
+def test_report_validator_rejects_tampered_theoretical_precision_evidence():
+    dataset = single_relevant_benchmark_dataset()
+    report = ProductionEmbeddingBenchmarkService(
+        encoder=ControlledEncoder(),
+        memory_mb_fn=lambda: 128.0,
+    ).evaluate(
+        dataset=dataset,
+        model=_model(),
+        top_k=1,
+        rejection_similarity_threshold=0.5,
+        cost_per_1000_queries_usd=0.0,
+    )
+    report["evaluation"][
+        "theoretical_maximum_precision_at_k"
+    ] = 0.5
+
+    with pytest.raises(ValueError, match="theoretical precision"):
+        ProductionEmbeddingBenchmarkReportValidator().validate(
+            report,
+            model=_model(),
+            dataset=dataset,
+        )
 
 
 def test_report_validator_detects_metric_threshold_and_fingerprint_tampering():

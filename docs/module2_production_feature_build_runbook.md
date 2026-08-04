@@ -129,6 +129,16 @@ The command exits after writing evidence whether the model passes or fails. A
 failed report remains useful for comparison but cannot be registered. Public
 leaderboard results alone are insufficient.
 
+Before model inference begins, the runner now calculates the theoretical
+maximum standard `precision_at_k` allowed by the reviewed relevant-document
+labels. It fails closed when the selected `top_k` can never meet the production
+policy. For example, a benchmark with one relevant document per supported case
+has a maximum precision of `0.10` at `top_k=10`, so it cannot satisfy a `0.60`
+precision floor. Such a single-label benchmark must be run explicitly as a
+top-one engineering evaluation, or the reviewed case catalog must be expanded
+with enough genuinely relevant documents for the intended retrieval depth.
+Do not weaken the policy or fabricate extra relevant labels to clear this gate.
+
 ```bash
 PYTHONPATH=. python scripts/register_production_embedding_model.py \
   --tenant-id "<tenant>" \
