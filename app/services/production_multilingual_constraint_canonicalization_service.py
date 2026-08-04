@@ -434,13 +434,62 @@ class ProductionMultilingualConstraintCanonicalizationService:
         query_text: str,
         entries: Sequence[ConstraintTaxonomyEntry],
     ) -> list[str]:
+        """Return maximal exact aliases without broad-parent collisions.
+
+        A reviewed specific alias may contain a broader approved alias, such as
+        ``montreal`` inside ``montreal downtown`` or a generic store/category
+        phrase inside a more specific venue phrase. The broader contained
+        match must not make an otherwise precise request ambiguous. Disjoint
+        maximal matches still remain ambiguous and therefore fail closed.
+        """
+
         normalized_query = normalize_multilingual_text(query_text)
+        if not normalized_query:
+            return []
+
         wrapped = f" {normalized_query} "
-        matches: list[str] = []
+        candidates: list[tuple[int, int, str, str]] = []
+
         for entry in entries:
-            if any(f" {alias} " in wrapped for alias in entry.aliases):
-                matches.append(entry.canonical_value)
-        return list(dict.fromkeys(matches))
+            for alias in entry.aliases:
+                needle = f" {alias} "
+                offset = 0
+                while True:
+                    found = wrapped.find(needle, offset)
+                    if found < 0:
+                        break
+                    start = found + 1
+                    end = start + len(alias)
+                    candidates.append(
+                        (start, end, entry.canonical_value, alias)
+                    )
+                    offset = found + 1
+
+        maximal: list[tuple[int, int, str, str]] = []
+        for candidate in candidates:
+            start, end, canonical_value, _alias = candidate
+            dominated = any(
+                other_canonical != canonical_value
+                and other_start <= start
+                and other_end >= end
+                and (other_end - other_start) > (end - start)
+                for (
+                    other_start,
+                    other_end,
+                    other_canonical,
+                    _other_alias,
+                ) in candidates
+            )
+            if not dominated:
+                maximal.append(candidate)
+
+        maximal.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+        return list(
+            dict.fromkeys(
+                canonical_value
+                for _start, _end, canonical_value, _alias in maximal
+            )
+        )
 
     def _reason_code(
         self,

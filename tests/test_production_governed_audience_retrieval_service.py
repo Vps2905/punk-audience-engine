@@ -448,3 +448,119 @@ def test_orchestrator_remains_disconnected_from_existing_proposal_flow():
     assert result["existing_proposal_flow_modified"] is False
     assert result["model_registration_performed"] is False
     assert result["threshold_changed"] is False
+
+
+def test_longest_specific_location_alias_beats_parent_location_alias():
+    taxonomy = GovernedConstraintTaxonomy(
+        taxonomy_id="global-audience-taxonomy",
+        version="reviewed-specificity-v1",
+        reviewed_by="taxonomy-owner",
+        locations=(
+            ConstraintTaxonomyEntry("montreal", aliases=("Montreal",)),
+            ConstraintTaxonomyEntry(
+                "montreal_downtown",
+                aliases=("Montreal Downtown",),
+            ),
+        ),
+        categories=(
+            ConstraintTaxonomyEntry("car_wash", aliases=("car wash",)),
+        ),
+        dayparts=(
+            ConstraintTaxonomyEntry("afternoon", aliases=("afternoon",)),
+        ),
+    )
+    service = ProductionMultilingualConstraintCanonicalizationService(
+        model_registry=FakeRegistry(),
+        semantic_resolver=FakeSemanticResolver(),
+    )
+
+    result = service.canonicalize(
+        _request(
+            query_text=(
+                "Find car wash audiences in Montreal Downtown "
+                "during the afternoon."
+            ),
+            taxonomy=taxonomy,
+            requested_locations=(),
+            requested_categories=("car wash",),
+            requested_dayparts=("afternoon",),
+        )
+    )
+
+    assert result.ready_for_retrieval is True
+    assert result.locations.values == ("montreal_downtown",)
+
+
+def test_longest_specific_category_alias_beats_generic_parent_alias():
+    taxonomy = GovernedConstraintTaxonomy(
+        taxonomy_id="global-audience-taxonomy",
+        version="reviewed-specificity-v1",
+        reviewed_by="taxonomy-owner",
+        locations=(
+            ConstraintTaxonomyEntry("montreal", aliases=("Montreal",)),
+        ),
+        categories=(
+            ConstraintTaxonomyEntry(
+                "restaurant",
+                aliases=("les visites de restaurants",),
+            ),
+            ConstraintTaxonomyEntry(
+                "fast_food_restaurant",
+                aliases=(
+                    "les visites de restaurants de restauration rapide",
+                ),
+            ),
+        ),
+        dayparts=(
+            ConstraintTaxonomyEntry(
+                "afternoon",
+                aliases=("l’après-midi",),
+            ),
+        ),
+    )
+    semantic = FakeSemanticResolver()
+    service = ProductionMultilingualConstraintCanonicalizationService(
+        model_registry=FakeRegistry(),
+        semantic_resolver=semantic,
+    )
+
+    result = service.canonicalize(
+        _request(
+            query_text=(
+                "Trouvez des audiences pour les visites de restaurants "
+                "de restauration rapide à Montreal l’après-midi."
+            ),
+            language="fr",
+            taxonomy=taxonomy,
+            requested_locations=("Montreal",),
+            requested_categories=(),
+            requested_dayparts=("l’après-midi",),
+        )
+    )
+
+    assert result.ready_for_retrieval is True
+    assert result.categories.values == ("fast_food_restaurant",)
+    assert semantic.calls == []
+
+
+def test_disjoint_exact_category_aliases_remain_ambiguous_and_fail_closed():
+    service = ProductionMultilingualConstraintCanonicalizationService(
+        model_registry=FakeRegistry(),
+        semantic_resolver=FakeSemanticResolver(),
+    )
+
+    result = service.canonicalize(
+        _request(
+            query_text=(
+                "Find restaurant and car wash audiences in Montreal "
+                "during the afternoon."
+            ),
+            requested_locations=("Montreal",),
+            requested_categories=(),
+            requested_dayparts=("afternoon",),
+        )
+    )
+
+    assert result.ready_for_retrieval is False
+    assert result.categories.status == "ambiguous"
+    assert result.reason_code == "category_requires_clarification"
