@@ -22,12 +22,23 @@ ConstraintStatus = Literal[
 
 
 def normalize_multilingual_text(value: Any) -> str:
-    """Normalize text without discarding non-Latin scripts."""
+    """Normalize text while preserving Unicode letters and combining marks."""
 
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
-    text = text.replace("_", " ")
-    text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
-    return " ".join(text.split())
+    output: list[str] = []
+    for character in text:
+        if character in {"\u200c", "\u200d"}:
+            # Ignore optional zero-width join controls so equivalent spellings
+            # normalize consistently without splitting a grapheme cluster.
+            continue
+        category = unicodedata.category(character)
+        if character == "_" or character.isspace():
+            output.append(" ")
+        elif category[0] in {"L", "M", "N"}:
+            output.append(character)
+        else:
+            output.append(" ")
+    return " ".join("".join(output).split())
 
 
 @dataclass(frozen=True)

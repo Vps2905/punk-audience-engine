@@ -9,6 +9,7 @@ from app.models.production_audience_retrieval_contracts import (
     GovernedAudienceRetrievalRequest,
     GovernedConstraintTaxonomy,
     ProductionRetrievalModelBinding,
+    normalize_multilingual_text,
 )
 from app.models.production_feature_build_contracts import EmbeddingModelSpec
 from app.services.production_dual_model_candidate_retrieval_service import (
@@ -232,6 +233,13 @@ def _candidate(
             "canonical_feature_fingerprint": fingerprint or feature_id
         },
     }
+
+
+def test_multilingual_normalization_preserves_combining_marks():
+    assert normalize_multilingual_text("কার ওয়াশ") == "কার ওয়াশ"
+    assert normalize_multilingual_text("Montreal-এ দুপুরে") == (
+        "montreal এ দুপুরে"
+    )
 
 
 def test_multilingual_exact_aliases_resolve_without_semantic_guessing():
