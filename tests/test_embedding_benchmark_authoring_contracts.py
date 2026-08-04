@@ -28,6 +28,13 @@ def _document_catalog_payload():
         ],
         "lineage": {
             "generator": "reviewed-synthetic-catalog-v1",
+            "review_status": "approved",
+            "reviewed_by": "model-owner",
+            "reviewed_at": "2026-07-30T12:00:00+00:00",
+            "audience_volume_claimed": False,
+            "document_source_lineage": {
+                "doc-1": "synthetic-source-doc-1",
+            },
         },
     }
 
@@ -90,3 +97,39 @@ def test_case_catalog_requires_named_approved_review():
     unreviewed["reviewed_by"] = ""
     with pytest.raises(ValueError, match="named reviewer"):
         EmbeddingBenchmarkCaseCatalog.from_mapping(unreviewed)
+
+
+def test_curated_document_catalog_requires_review_and_unique_lineage():
+    unreviewed = _document_catalog_payload()
+    unreviewed["lineage"]["review_status"] = "pending"
+    with pytest.raises(ValueError, match="approved human review"):
+        EmbeddingBenchmarkDocumentCatalog.from_mapping(unreviewed)
+
+    missing_reviewer = _document_catalog_payload()
+    missing_reviewer["lineage"]["reviewed_by"] = ""
+    with pytest.raises(ValueError, match="named reviewer"):
+        EmbeddingBenchmarkDocumentCatalog.from_mapping(missing_reviewer)
+
+    volume_claim = _document_catalog_payload()
+    volume_claim["lineage"]["audience_volume_claimed"] = True
+    with pytest.raises(ValueError, match="cannot claim audience volume"):
+        EmbeddingBenchmarkDocumentCatalog.from_mapping(volume_claim)
+
+    missing_lineage = _document_catalog_payload()
+    missing_lineage["lineage"]["document_source_lineage"] = {}
+    with pytest.raises(ValueError, match="cover every benchmark document"):
+        EmbeddingBenchmarkDocumentCatalog.from_mapping(missing_lineage)
+
+
+def test_pgvector_document_catalog_does_not_require_curated_review_manifest():
+    payload = _document_catalog_payload()
+    payload["source_type"] = "pgvector_privacy_safe_features"
+    payload["rights_status"] = "offline_evaluation_only"
+    payload["lineage"] = {
+        "feature_set_id": "feature-set-1",
+        "feature_set_version": 1,
+    }
+
+    catalog = EmbeddingBenchmarkDocumentCatalog.from_mapping(payload)
+
+    assert catalog.source_type == "pgvector_privacy_safe_features"

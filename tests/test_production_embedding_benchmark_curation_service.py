@@ -45,7 +45,17 @@ def _catalog(
             "rights_status": "synthetic_evaluation",
             "contains_raw_identifiers": False,
             "documents": documents,
-            "lineage": {"purpose": "unit-test"},
+            "lineage": {
+                "purpose": "unit-test",
+                "review_status": "approved",
+                "reviewed_by": "unit-test-reviewer",
+                "reviewed_at": "2026-07-30T12:00:00+00:00",
+                "audience_volume_claimed": False,
+                "document_source_lineage": {
+                    value["document_id"]: f"unit-test-source:{value['document_id']}"
+                    for value in documents
+                },
+            },
         }
     )
 
@@ -82,7 +92,17 @@ def _hard_negative_catalog() -> EmbeddingBenchmarkDocumentCatalog:
             "rights_status": "synthetic_evaluation",
             "contains_raw_identifiers": False,
             "documents": documents,
-            "lineage": {"purpose": "unit-test"},
+            "lineage": {
+                "purpose": "unit-test",
+                "review_status": "approved",
+                "reviewed_by": "unit-test-reviewer",
+                "reviewed_at": "2026-07-30T12:00:00+00:00",
+                "audience_volume_claimed": False,
+                "document_source_lineage": {
+                    value["document_id"]: f"unit-test-source:{value['document_id']}"
+                    for value in documents
+                },
+            },
         }
     )
 

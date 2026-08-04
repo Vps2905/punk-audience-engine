@@ -1,0 +1,117 @@
+{
+  "pack_id": "reviewed-language-pack-example",
+  "pack_version": "immutable-example-v1",
+  "review_status": "approved",
+  "reviewed_by": "replace_with_named_language_reviewer",
+  "reviewed_at": "2026-08-04T12:00:00+00:00",
+  "translation_review_completed": true,
+  "language_order": [
+    "en",
+    "fr",
+    "es",
+    "hi",
+    "bn"
+  ],
+  "languages": {
+    "en": {
+      "supported_query_template": "Find audiences interested in {category} in {location} during {daypart}.",
+      "unsupported_query_template": "Find audiences in {location}.",
+      "category_labels": {
+        "restaurant": "restaurant visits"
+      },
+      "daypart_labels": {
+        "afternoon": "the afternoon",
+        "evening": "the evening",
+        "morning": "the morning",
+        "night": "the night"
+      }
+    },
+    "fr": {
+      "supported_query_template": "Trouvez des audiences intéressées par {category} à {location} {daypart}.",
+      "unsupported_query_template": "Trouvez des audiences à {location}.",
+      "category_labels": {
+        "restaurant": "les visites de restaurants"
+      },
+      "daypart_labels": {
+        "afternoon": "l’après-midi",
+        "evening": "le soir",
+        "morning": "le matin",
+        "night": "la nuit"
+      }
+    },
+    "es": {
+      "supported_query_template": "Encuentra audiencias interesadas en {category} en {location} {daypart}.",
+      "unsupported_query_template": "Encuentra audiencias en {location}.",
+      "category_labels": {
+        "restaurant": "visitas a restaurantes"
+      },
+      "daypart_labels": {
+        "afternoon": "por la tarde",
+        "evening": "al atardecer",
+        "morning": "por la mañana",
+        "night": "por la noche"
+      }
+    },
+    "hi": {
+      "supported_query_template": "{location} में {daypart} {category} में रुचि रखने वाली ऑडियंस खोजें।",
+      "unsupported_query_template": "{location} में ऑडियंस खोजें।",
+      "category_labels": {
+        "restaurant": "रेस्तरां जाने"
+      },
+      "daypart_labels": {
+        "afternoon": "दोपहर के समय",
+        "evening": "शाम के समय",
+        "morning": "सुबह के समय",
+        "night": "रात के समय"
+      }
+    },
+    "bn": {
+      "supported_query_template": "{location}-এ {daypart} {category} বিষয়ে আগ্রহী অডিয়েন্স খুঁজুন।",
+      "unsupported_query_template": "{location}-এ অডিয়েন্স খুঁজুন।",
+      "category_labels": {
+        "restaurant": "রেস্তোরাঁয় যাওয়া"
+      },
+      "daypart_labels": {
+        "afternoon": "দুপুরে",
+        "evening": "সন্ধ্যায়",
+        "morning": "সকালে",
+        "night": "রাতে"
+      }
+    }
+  },
+  "unsupported_location_labels": {
+    "brindlehaven": {
+      "en": "Brindlehaven",
+      "fr": "Brindlehaven",
+      "es": "Brindlehaven",
+      "hi": "ब्रिंडलहेवन",
+      "bn": "ব্রিন্ডলহেভেন"
+    },
+    "cedar_harbor": {
+      "en": "Cedar Harbor",
+      "fr": "Cedar Harbor",
+      "es": "Cedar Harbor",
+      "hi": "सीडर हार्बर",
+      "bn": "সিডার হারবার"
+    },
+    "dovewood": {
+      "en": "Dovewood",
+      "fr": "Dovewood",
+      "es": "Dovewood",
+      "hi": "डववुड",
+      "bn": "ডাভউড"
+    },
+    "rivermere": {
+      "en": "Rivermere",
+      "fr": "Rivermere",
+      "es": "Rivermere",
+      "hi": "रिवरमीर",
+      "bn": "রিভারমিয়ার"
+    }
+  },
+  "lineage": {
+    "purpose": "schema_example_only",
+    "machine_translation_auto_approved": false,
+    "production_coverage": false
+  }
+}

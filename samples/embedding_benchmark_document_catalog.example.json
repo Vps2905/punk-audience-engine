@@ -1,30 +1,38 @@
 {
   "catalog_id": "reviewed-safe-document-catalog-example",
   "catalog_version": "immutable-example-v1",
-  "source_type": "curated_synthetic_features",
-  "source_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "privacy_status": "safe",
-  "rights_status": "synthetic_evaluation",
   "contains_raw_identifiers": false,
   "documents": [
     {
-      "document_id": "synthetic-feature-001",
-      "text": "Synthetic aggregate traits for restaurant visits during the evening in example city alpha.",
-      "location": "example_city_alpha",
       "category": "restaurant",
-      "daypart": "evening"
+      "daypart": "evening",
+      "document_id": "synthetic-feature-001",
+      "location": "example_city_alpha",
+      "text": "Synthetic aggregate traits for restaurant visits during the evening in example city alpha."
     },
     {
-      "document_id": "synthetic-feature-002",
-      "text": "Synthetic aggregate traits for cafe visits during the morning in example city beta.",
-      "location": "example_city_beta",
       "category": "cafe",
-      "daypart": "morning"
+      "daypart": "morning",
+      "document_id": "synthetic-feature-002",
+      "location": "example_city_beta",
+      "text": "Synthetic aggregate traits for cafe visits during the morning in example city beta."
     }
   ],
   "lineage": {
+    "audience_volume_claimed": false,
+    "document_source_lineage": {
+      "synthetic-feature-001": "schema-example-source:synthetic-feature-001",
+      "synthetic-feature-002": "schema-example-source:synthetic-feature-002"
+    },
+    "production_coverage": false,
     "purpose": "schema_example_only",
-    "synthetic": true,
-    "production_coverage": false
-  }
+    "review_status": "approved",
+    "reviewed_at": "2026-07-30T12:00:00+00:00",
+    "reviewed_by": "replace_with_named_reviewer",
+    "synthetic": true
+  },
+  "privacy_status": "safe",
+  "rights_status": "synthetic_evaluation",
+  "source_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_type": "curated_synthetic_features"
 }

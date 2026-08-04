@@ -54,6 +54,82 @@ def _json_safe_mapping(
         ) from None
 
 
+def _validated_catalog_lineage(
+    payload: Mapping[str, Any],
+    *,
+    source_type: str,
+    document_ids: list[str],
+) -> dict[str, Any]:
+    lineage = _json_safe_mapping(payload, "catalog lineage")
+    if source_type not in {
+        "curated_synthetic_features",
+        "curated_aggregated_features",
+    }:
+        return lineage
+
+    if normalize_taxonomy_value(
+        lineage.get("review_status")
+    ) != "approved":
+        raise ValueError(
+            "Curated benchmark documents require approved human review."
+        )
+    lineage["review_status"] = "approved"
+
+    reviewer = normalize_taxonomy_value(
+        lineage.get("reviewed_by")
+    )
+    if not reviewer:
+        raise ValueError(
+            "Curated benchmark documents require a named reviewer."
+        )
+    lineage["reviewed_by"] = reviewer
+
+    reviewed_at = parse_utc_datetime(
+        lineage.get("reviewed_at")
+    )
+    if reviewed_at is None:
+        raise ValueError(
+            "Curated benchmark documents require reviewed_at."
+        )
+    lineage["reviewed_at"] = reviewed_at.astimezone(
+        timezone.utc
+    ).isoformat()
+
+    if bool(lineage.get("audience_volume_claimed", True)):
+        raise ValueError(
+            "Curated benchmark documents cannot claim audience volume."
+        )
+    lineage["audience_volume_claimed"] = False
+
+    source_lineage = lineage.get("document_source_lineage")
+    if not isinstance(source_lineage, Mapping):
+        raise ValueError(
+            "Curated benchmark documents require per-document source lineage."
+        )
+    normalized_lineage = {
+        _required_text(key, "document_source_lineage key"): _required_text(
+            value,
+            "document_source_lineage value",
+        )
+        for key, value in source_lineage.items()
+    }
+    if set(normalized_lineage) != set(document_ids):
+        raise ValueError(
+            "Per-document source lineage must cover every benchmark document."
+        )
+    if len(set(normalized_lineage.values())) != len(
+        normalized_lineage
+    ):
+        raise ValueError(
+            "Per-document source lineage values must be unique."
+        )
+    lineage["document_source_lineage"] = {
+        key: normalized_lineage[key]
+        for key in sorted(normalized_lineage)
+    }
+    return lineage
+
+
 @dataclass(frozen=True)
 class EmbeddingBenchmarkDocumentCatalog:
     catalog_id: str
@@ -113,7 +189,11 @@ class EmbeddingBenchmarkDocumentCatalog:
         object.__setattr__(
             self,
             "lineage",
-            _json_safe_mapping(self.lineage, "catalog lineage"),
+            _validated_catalog_lineage(
+                self.lineage,
+                source_type=source_type,
+                document_ids=document_ids,
+            ),
         )
 
     @classmethod

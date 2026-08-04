@@ -26,3 +26,11 @@ global evaluation.
 The planner does not generate queries, documents, gold labels, audience
 volume, model scores, model approval, features, audience activation or export.
 Every candidate pair remains subject to named human review.
+
+## Curated document review enforcement
+
+Curated synthetic and aggregated document catalogs now require approved named
+human review, a UTC review timestamp, an explicit no-audience-volume-claim
+attestation, and one unique source-lineage reference per document. Pgvector
+catalogs exported from privacy-safe feature sets retain their system lineage
+boundary and do not require the curated-catalog review manifest.
