@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import resource
 import statistics
 import time
@@ -23,6 +24,10 @@ from app.models.production_feature_build_contracts import EmbeddingModelSpec
 from app.models.production_governed_retrieval_benchmark_contracts import (
     GovernedRetrievalBenchmarkDatasetIdentity,
     GovernedRetrievalBenchmarkPolicy,
+)
+from app.services.production_governed_constraint_taxonomy_service import (
+    ENGINEERING_TAXONOMY_SCOPE,
+    load_governed_constraint_taxonomy,
 )
 from app.services.production_dual_model_candidate_retrieval_service import (
     ProductionDualModelCandidateRetrievalService,
@@ -412,7 +417,9 @@ class ProductionGovernedRetrievalBenchmarkService:
 
     def evaluate(self, dataset: Mapping[str, Any]) -> dict[str, Any]:
         identity, documents, cases = self._validate_dataset(dataset)
-        taxonomy, taxonomy_source = self._build_taxonomy(dataset, documents)
+        taxonomy, taxonomy_source, taxonomy_lineage = self._build_taxonomy(
+            dataset, documents
+        )
         tenant_id = "offline_benchmark_tenant"
         execution_mode = "historical_preview"
         bindings = (
@@ -631,10 +638,14 @@ class ProductionGovernedRetrievalBenchmarkService:
             target_rate=self._policy.target_unsupported_false_match_rate,
             confidence_level=self._policy.confidence_level,
         )
+        taxonomy_native_human_signoff = bool(
+            taxonomy_lineage.get("native_human_review_completed")
+        )
         benchmark_evidence_ready = (
             engineering_passed
             and identity.unsupported_case_count >= required_unsupported
             and bool(dataset.get("native_human_signoff_complete"))
+            and taxonomy_native_human_signoff
         )
         process_peak_kb = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         report = {
@@ -653,6 +664,31 @@ class ProductionGovernedRetrievalBenchmarkService:
                 "taxonomy_fingerprint": taxonomy.fingerprint,
                 "taxonomy_source": taxonomy_source,
                 "review_status": taxonomy.review_status,
+                "approval_scope": taxonomy_lineage["approval_scope"],
+                "native_human_review_completed": (
+                    taxonomy_native_human_signoff
+                ),
+                "production_certification_status": taxonomy_lineage[
+                    "production_certification_status"
+                ],
+                "oracle_case_constraints_used": taxonomy_lineage[
+                    "oracle_case_constraints_used"
+                ],
+                "source_language_pack_id": taxonomy_lineage.get(
+                    "source_language_pack_id"
+                ),
+                "source_language_pack_version": taxonomy_lineage.get(
+                    "source_language_pack_version"
+                ),
+                "source_review_method": taxonomy_lineage.get(
+                    "source_review_method"
+                ),
+                "source_language_pack_sha256": taxonomy_lineage.get(
+                    "source_language_pack_sha256"
+                ),
+                "source_dataset_fingerprint": taxonomy_lineage.get(
+                    "source_dataset_fingerprint"
+                ),
             },
             "models": {
                 "canonicalizer": self.PRIMARY_MODEL.to_safe_dict(),
@@ -671,6 +707,9 @@ class ProductionGovernedRetrievalBenchmarkService:
                 "native_human_signoff_complete": bool(
                     dataset.get("native_human_signoff_complete")
                 ),
+                "taxonomy_native_human_signoff_complete": (
+                    taxonomy_native_human_signoff
+                ),
                 "unsupported_case_count": identity.unsupported_case_count,
                 "minimum_zero_failure_unsupported_cases": required_unsupported,
                 "empirical_unsupported_rate_resolution": (
@@ -682,6 +721,9 @@ class ProductionGovernedRetrievalBenchmarkService:
                     engineering_passed=engineering_passed,
                     native_human_signoff=bool(
                         dataset.get("native_human_signoff_complete")
+                    ),
+                    taxonomy_native_human_signoff=(
+                        taxonomy_native_human_signoff
                     ),
                     unsupported_count=identity.unsupported_case_count,
                     required_unsupported=required_unsupported,
@@ -770,51 +812,86 @@ class ProductionGovernedRetrievalBenchmarkService:
         self,
         dataset: Mapping[str, Any],
         documents: Sequence[Mapping[str, Any]],
-    ) -> tuple[GovernedConstraintTaxonomy, str]:
+    ) -> tuple[GovernedConstraintTaxonomy, str, dict[str, Any]]:
         supplied = dataset.get("governed_constraint_taxonomy")
         if isinstance(supplied, Mapping):
-            return _taxonomy_from_mapping(supplied), "dataset_governed_constraint_taxonomy"
+            loaded = load_governed_constraint_taxonomy(
+                supplied,
+                allow_engineering_scope=True,
+                require_native_human_review=False,
+            )
+            canonical_dataset_fingerprint = (
+                EmbeddingBenchmarkDataset.from_mapping(dataset).fingerprint
+            )
+            source_dataset_fingerprint = loaded.lineage.get(
+                "source_dataset_fingerprint"
+            )
+            if (
+                loaded.lineage.get("approval_scope")
+                == ENGINEERING_TAXONOMY_SCOPE
+                and source_dataset_fingerprint
+                != canonical_dataset_fingerprint
+            ):
+                raise ValueError(
+                    "Governed taxonomy was built for a different "
+                    "benchmark dataset."
+                )
+            return (
+                loaded.taxonomy,
+                "dataset_governed_constraint_taxonomy",
+                loaded.to_safe_metadata(),
+            )
         locations = sorted({str(value["location"]) for value in documents})
         categories = sorted({str(value["category"]) for value in documents})
         dayparts = sorted({str(value["daypart"]) for value in documents})
-        return (
-            GovernedConstraintTaxonomy(
-                taxonomy_id="offline-benchmark-derived-canonical-taxonomy",
-                version="v1",
-                reviewed_by="benchmark_dataset_owner",
-                review_status="approved",
-                locations=tuple(
-                    ConstraintTaxonomyEntry(
-                        value,
-                        aliases=(value.replace("_", " "),),
-                        descriptions=(f"location {value.replace('_', ' ')}",),
-                    )
-                    for value in locations
-                ),
-                categories=tuple(
-                    ConstraintTaxonomyEntry(
-                        value,
-                        aliases=(value.replace("_", " "),),
-                        descriptions=(
-                            f"people visiting {value.replace('_', ' ')}",
-                            f"audience associated with {value.replace('_', ' ')} venues",
-                        ),
-                    )
-                    for value in categories
-                ),
-                dayparts=tuple(
-                    ConstraintTaxonomyEntry(
-                        value,
-                        aliases=(value.replace("_", " "),),
-                        descriptions=(
-                            f"visits during {value.replace('_', ' ')}",
-                            f"activities in the {value.replace('_', ' ')} period",
-                        ),
-                    )
-                    for value in dayparts
-                ),
+        taxonomy = GovernedConstraintTaxonomy(
+            taxonomy_id="offline-benchmark-derived-canonical-taxonomy",
+            version="v1",
+            reviewed_by="benchmark_dataset_owner",
+            review_status="approved",
+            locations=tuple(
+                ConstraintTaxonomyEntry(
+                    value,
+                    aliases=(value.replace("_", " "),),
+                    descriptions=(f"location {value.replace('_', ' ')}",),
+                )
+                for value in locations
             ),
+            categories=tuple(
+                ConstraintTaxonomyEntry(
+                    value,
+                    aliases=(value.replace("_", " "),),
+                    descriptions=(
+                        f"people visiting {value.replace('_', ' ')}",
+                        f"audience associated with {value.replace('_', ' ')} venues",
+                    ),
+                )
+                for value in categories
+            ),
+            dayparts=tuple(
+                ConstraintTaxonomyEntry(
+                    value,
+                    aliases=(value.replace("_", " "),),
+                    descriptions=(
+                        f"visits during {value.replace('_', ' ')}",
+                        f"activities in the {value.replace('_', ' ')} period",
+                    ),
+                )
+                for value in dayparts
+            ),
+        )
+        return (
+            taxonomy,
             "dataset_canonical_fields_without_multilingual_alias_oracle",
+            {
+                "approval_scope": "offline_benchmark_derived_only",
+                "native_human_review_completed": False,
+                "production_certification_status": "not_eligible",
+                "oracle_case_constraints_used": False,
+                "source_language_pack_id": None,
+                "source_language_pack_version": None,
+                "source_review_method": None,
+            },
         )
 
     def _summarize(
@@ -973,8 +1050,50 @@ def validate_governed_retrieval_benchmark_report(
     for field_name in required_false:
         if report.get(field_name) is not False:
             raise ValueError(f"Unsafe benchmark report flag: {field_name}.")
-    if dict(report.get("production_certification") or {}).get("ready") is not False:
+    certification = dict(report.get("production_certification") or {})
+    if certification.get("ready") is not False:
         raise ValueError("Offline benchmark cannot grant production certification.")
+
+    taxonomy = report.get("taxonomy")
+    if not isinstance(taxonomy, Mapping):
+        raise ValueError("Benchmark report taxonomy metadata is required.")
+    if taxonomy.get("oracle_case_constraints_used") is not False:
+        raise ValueError("Benchmark taxonomy cannot use oracle case constraints.")
+    taxonomy_native_review = taxonomy.get("native_human_review_completed")
+    if not isinstance(taxonomy_native_review, bool):
+        raise ValueError("Benchmark taxonomy native-review flag is invalid.")
+    if certification.get("taxonomy_native_human_signoff_complete") is not (
+        taxonomy_native_review
+    ):
+        raise ValueError(
+            "Benchmark taxonomy and certification signoff metadata differ."
+        )
+    if report.get("benchmark_evidence_ready") is True and not (
+        taxonomy_native_review
+    ):
+        raise ValueError(
+            "Benchmark evidence cannot be ready before taxonomy signoff."
+        )
+    if taxonomy.get("approval_scope") == ENGINEERING_TAXONOMY_SCOPE:
+        source_dataset_fingerprint = str(
+            taxonomy.get("source_dataset_fingerprint") or ""
+        )
+        benchmark_fingerprint = str(
+            dict(report.get("benchmark") or {}).get("dataset_fingerprint")
+            or ""
+        )
+        if source_dataset_fingerprint != benchmark_fingerprint:
+            raise ValueError(
+                "Benchmark taxonomy source dataset fingerprint mismatch."
+            )
+        source_pack_sha = str(
+            taxonomy.get("source_language_pack_sha256") or ""
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", source_pack_sha):
+            raise ValueError(
+                "Benchmark taxonomy source language-pack SHA-256 is invalid."
+            )
+
     for case in report.get("case_diagnostics") or ():
         if not isinstance(case, Mapping):
             raise ValueError("Case diagnostics must be mappings.")
@@ -1061,31 +1180,6 @@ def _canonical_case(value: Any, document_ids: set[str]) -> dict[str, Any]:
     }
 
 
-def _taxonomy_from_mapping(value: Mapping[str, Any]) -> GovernedConstraintTaxonomy:
-    def entries(key: str) -> tuple[ConstraintTaxonomyEntry, ...]:
-        raw_entries = value.get(key)
-        if not isinstance(raw_entries, Sequence) or isinstance(raw_entries, (str, bytes)):
-            raise ValueError(f"Governed taxonomy {key} must be a sequence.")
-        return tuple(
-            ConstraintTaxonomyEntry(
-                canonical_value=str(item.get("canonical_value") or ""),
-                aliases=tuple(item.get("aliases") or ()),
-                descriptions=tuple(item.get("descriptions") or ()),
-            )
-            for item in raw_entries
-            if isinstance(item, Mapping)
-        )
-
-    return GovernedConstraintTaxonomy(
-        taxonomy_id=str(value.get("taxonomy_id") or ""),
-        version=str(value.get("version") or ""),
-        reviewed_by=str(value.get("reviewed_by") or ""),
-        review_status=str(value.get("review_status") or "approved"),
-        locations=entries("locations"),
-        categories=entries("categories"),
-        dayparts=entries("dayparts"),
-    )
-
 
 def _group_search_calls(
     calls: Sequence[_SearchCall],
@@ -1146,6 +1240,7 @@ def _certification_reasons(
     *,
     engineering_passed: bool,
     native_human_signoff: bool,
+    taxonomy_native_human_signoff: bool,
     unsupported_count: int,
     required_unsupported: int,
 ) -> list[str]:
@@ -1154,6 +1249,8 @@ def _certification_reasons(
         reasons.append("engineering_policy_not_passed")
     if not native_human_signoff:
         reasons.append("native_human_signoff_pending")
+    if not taxonomy_native_human_signoff:
+        reasons.append("taxonomy_native_human_signoff_pending")
     if unsupported_count < required_unsupported:
         reasons.append("unsupported_calibration_sample_insufficient")
     reasons.append("model_registration_and_external_release_gates_pending")

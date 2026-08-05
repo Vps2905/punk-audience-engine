@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from app.models.audience_feature_contracts import stable_digest
 from app.models.embedding_benchmark_contracts import EmbeddingBenchmarkDataset
 
 from app.models.production_governed_retrieval_benchmark_contracts import (
@@ -287,4 +288,93 @@ def test_report_validator_rejects_tampering_and_unsafe_flags():
     tampered = dict(report)
     tampered["production_routing_enabled"] = True
     with pytest.raises(ValueError, match="fingerprint mismatch|Unsafe"):
+        validate_governed_retrieval_benchmark_report(tampered)
+
+
+def test_supplied_engineering_taxonomy_lineage_is_visible_and_never_certifies():
+    from app.services.production_governed_constraint_taxonomy_service import (
+        build_engineering_multilingual_taxonomy_artifacts,
+    )
+
+    language_pack = {
+        "pack_id": "benchmark-taxonomy-test-pack",
+        "pack_version": "reviewed-v1",
+        "review_status": "approved",
+        "reviewed_by": "taxonomy-test-owner",
+        "translation_review_completed": True,
+        "language_order": ["bn", "en"],
+        "languages": {
+            "bn": {
+                "category_labels": {
+                    "car_wash": "কার ওয়াশ",
+                    "restaurant": "রেস্তোরাঁ",
+                },
+                "daypart_labels": {
+                    "afternoon": "দুপুরে",
+                    "evening": "সন্ধ্যায়",
+                },
+            },
+            "en": {
+                "category_labels": {
+                    "car_wash": "car wash",
+                    "restaurant": "restaurant",
+                },
+                "daypart_labels": {
+                    "afternoon": "afternoon",
+                    "evening": "evening",
+                },
+            },
+        },
+        "lineage": {
+            "approval_scope": "engineering_benchmark_generation_only",
+            "native_human_review_completed": False,
+            "machine_translation_auto_approved": False,
+            "requires_native_language_review": True,
+            "requires_named_human_review": True,
+            "language_count": 2,
+            "production_certification_status": (
+                "pending_native_human_signoff"
+            ),
+            "review_method": "ai_assisted_multilingual_quality_review",
+            "observed_category_count": 2,
+            "observed_daypart_count": 2,
+        },
+    }
+    artifacts = build_engineering_multilingual_taxonomy_artifacts(
+        dataset_payload=_dataset(),
+        language_pack=language_pack,
+        language_pack_sha256="a" * 64,
+    )
+
+    report = _service().evaluate(artifacts.dataset_envelope)
+
+    assert report["engineering_passed"] is True
+    assert report["benchmark_evidence_ready"] is False
+    assert report["taxonomy"]["approval_scope"] == (
+        "engineering_benchmark_only"
+    )
+    assert report["taxonomy"]["native_human_review_completed"] is False
+    assert report["taxonomy"]["oracle_case_constraints_used"] is False
+    assert report["taxonomy"]["source_language_pack_sha256"] == "a" * 64
+    assert report["taxonomy"]["source_dataset_fingerprint"] == (
+        report["benchmark"]["dataset_fingerprint"]
+    )
+    assert report["production_certification"]["ready"] is False
+    assert "taxonomy_native_human_signoff_pending" in report[
+        "production_certification"
+    ]["reason_codes"]
+
+
+def test_report_validator_rejects_taxonomy_signoff_metadata_mismatch():
+    report = _service().evaluate(_dataset())
+    tampered = dict(report)
+    tampered["production_certification"] = {
+        **report["production_certification"],
+        "taxonomy_native_human_signoff_complete": True,
+    }
+    unsigned = dict(tampered)
+    unsigned.pop("report_fingerprint", None)
+    tampered["report_fingerprint"] = stable_digest(unsigned)
+
+    with pytest.raises(ValueError, match="signoff metadata differ"):
         validate_governed_retrieval_benchmark_report(tampered)

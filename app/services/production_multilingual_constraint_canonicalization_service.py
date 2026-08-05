@@ -177,22 +177,33 @@ class ProductionMultilingualConstraintCanonicalizationService:
             explicit_values=request.requested_locations,
             entries=entries["location"],
         )
-        categories = self._resolve_semantic_dimension(
-            query_text=request.query_text,
-            explicit_values=request.requested_categories,
-            entries=entries["category"],
-            dimension="category",
-            model=request.canonicalizer_model,
-            required=True,
-        )
-        dayparts = self._resolve_semantic_dimension(
-            query_text=request.query_text,
-            explicit_values=request.requested_dayparts,
-            entries=entries["daypart"],
-            dimension="daypart",
-            model=request.canonicalizer_model,
-            required=False,
-        )
+        if locations.status == "resolved":
+            categories = self._resolve_semantic_dimension(
+                query_text=request.query_text,
+                explicit_values=request.requested_categories,
+                entries=entries["category"],
+                dimension="category",
+                model=request.canonicalizer_model,
+                required=True,
+            )
+            dayparts = self._resolve_semantic_dimension(
+                query_text=request.query_text,
+                explicit_values=request.requested_dayparts,
+                entries=entries["daypart"],
+                dimension="daypart",
+                model=request.canonicalizer_model,
+                required=False,
+            )
+        else:
+            # Location is a mandatory fail-closed boundary. Once it cannot be
+            # resolved, category/daypart inference cannot make the request
+            # retrieval-eligible, so avoid expensive semantic model work.
+            categories = self._not_evaluated_after_location_failure(
+                "category"
+            )
+            dayparts = self._not_evaluated_after_location_failure(
+                "daypart"
+            )
 
         clarification_fields = tuple(
             dimension
@@ -234,6 +245,19 @@ class ProductionMultilingualConstraintCanonicalizationService:
             ready_for_retrieval=ready,
             reason_code=reason_code,
             clarification_fields=clarification_fields,
+        )
+
+    @staticmethod
+    def _not_evaluated_after_location_failure(
+        dimension: ConstraintDimension,
+    ) -> ConstraintFieldResolution:
+        return ConstraintFieldResolution(
+            dimension=dimension,
+            status="not_requested",
+            confidence=0.0,
+            evidence=(
+                "not_evaluated_after_location_requires_clarification",
+            ),
         )
 
     def _resolve_location(

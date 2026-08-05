@@ -278,6 +278,42 @@ def test_unknown_explicit_location_fails_closed_without_nearest_mapping():
     assert result.locations.values == ()
 
 
+def test_unresolved_location_short_circuits_semantic_dimensions():
+    semantic = FakeSemanticResolver(
+        scores={
+            "category": [("car_wash", 0.99)],
+            "daypart": [("afternoon", 0.99)],
+        }
+    )
+    service = ProductionMultilingualConstraintCanonicalizationService(
+        model_registry=FakeRegistry(),
+        semantic_resolver=semantic,
+    )
+
+    result = service.canonicalize(
+        _request(
+            query_text="Find audiences in Ottawa.",
+            requested_locations=(),
+            requested_categories=(),
+            requested_dayparts=(),
+        )
+    )
+
+    assert result.ready_for_retrieval is False
+    assert result.locations.status == "unresolved"
+    assert result.categories.status == "not_requested"
+    assert result.dayparts.status == "not_requested"
+    assert result.categories.evidence == (
+        "not_evaluated_after_location_requires_clarification",
+    )
+    assert result.dayparts.evidence == (
+        "not_evaluated_after_location_requires_clarification",
+    )
+    assert result.reason_code == "location_requires_clarification"
+    assert result.clarification_fields == ("location",)
+    assert semantic.calls == []
+
+
 def test_semantic_resolution_exposes_per_field_confidence_and_margin():
     semantic = FakeSemanticResolver(
         scores={
