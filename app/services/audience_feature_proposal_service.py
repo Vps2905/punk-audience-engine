@@ -213,14 +213,44 @@ class AudienceFeatureProposalService:
                 explanation=hard_block["explanation"],
             )
 
+        structured_filters: dict[str, list[str]] = {}
+        invalid_structured_fields: list[str] = []
+        for field_name in (
+            "locations",
+            "categories",
+            "dayparts",
+            "exclusions",
+        ):
+            normalized, invalid = self._clean_structured_list(
+                request.get(field_name)
+            )
+            structured_filters[field_name] = normalized
+            if invalid:
+                invalid_structured_fields.append(field_name)
+
+        if invalid_structured_fields:
+            return self._blocked_response(
+                request=request,
+                feature_set=feature_set,
+                proposal_id=proposal_id,
+                execution_mode=execution_mode,
+                reason_code="blocked_unresolved_structured_filter",
+                explanation=(
+                    "One or more structured audience filters could not be "
+                    "converted into governed canonical values. Clarification "
+                    "or multilingual canonicalization is required before "
+                    "retrieval."
+                ),
+            )
+
         query_embedding = self._query_embedding_service.encode(
             audience_intent,
             feature_set,
         )
-        locations = self._clean_list(request.get("locations"))
-        categories = self._clean_list(request.get("categories"))
-        dayparts = self._clean_list(request.get("dayparts"))
-        exclusions = self._clean_list(request.get("exclusions"))
+        locations = structured_filters["locations"]
+        categories = structured_filters["categories"]
+        dayparts = structured_filters["dayparts"]
+        exclusions = structured_filters["exclusions"]
         top_k = max(1, min(int(request.get("top_k") or 10), 50))
 
         candidates = self._feature_store.hybrid_search(
@@ -534,16 +564,31 @@ class AudienceFeatureProposalService:
         ).encode("utf-8")
         return "audience_proposal_" + hashlib.sha256(payload).hexdigest()[:24]
 
-    def _clean_list(self, value: Any) -> list[str]:
+    def _clean_structured_list(
+        self,
+        value: Any,
+    ) -> tuple[list[str], bool]:
         if value is None:
-            return []
+            return [], False
         values = [value] if isinstance(value, str) else list(value)
         output: list[str] = []
+        invalid = False
         for item in values:
-            normalized = normalize_taxonomy_value(item)
-            if normalized and normalized not in output:
+            raw = " ".join(str(item or "").split())
+            if not raw:
+                continue
+            normalized = normalize_taxonomy_value(raw)
+            if not normalized:
+                # Never silently drop a non-empty structured filter. The
+                # legacy feature proposal boundary accepts canonical ASCII
+                # slugs only; multilingual text must first pass through the
+                # governed canonicalizer. Dropping the value would remove a
+                # hard eligibility or exclusion constraint.
+                invalid = True
+                continue
+            if normalized not in output:
                 output.append(normalized)
-        return output
+        return output, invalid
 
     def _required_slug(self, value: Any, label: str) -> str:
         normalized = normalize_taxonomy_value(value)

@@ -217,3 +217,42 @@ def test_export_action_only_request_is_terminal_before_ranking():
     assert result["candidate_cohorts"] == []
     assert result["downstream_export_enabled"] is False
     assert store.search_calls == []
+
+
+def test_non_ascii_location_filter_fails_closed_before_embedding_or_search():
+    store = FakeFeatureStore()
+
+    result = _service(store).propose(
+        _request(
+            audience_intent="ब्रिंडलहेवन में ऑडियंस खोजें।",
+            locations=["ब्रिंडलहेवन"],
+            categories=[],
+            dayparts=[],
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == (
+        "blocked_unresolved_structured_filter"
+    )
+    assert result["candidate_cohorts"] == []
+    assert result["activation_eligible"] is False
+    assert result["downstream_export_enabled"] is False
+    assert store.search_calls == []
+
+
+def test_non_ascii_exclusion_is_never_silently_dropped():
+    store = FakeFeatureStore()
+
+    result = _service(store).propose(
+        _request(exclusions=["প্রতিযোগী রেস্তোরাঁ"])
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == (
+        "blocked_unresolved_structured_filter"
+    )
+    assert result["candidate_cohorts"] == []
+    assert result["activation_eligible"] is False
+    assert result["downstream_export_enabled"] is False
+    assert store.search_calls == []
