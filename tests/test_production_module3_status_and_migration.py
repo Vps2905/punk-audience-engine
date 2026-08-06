@@ -95,3 +95,87 @@ def test_module3_evaluation_script_loads_repository_dotenv(monkeypatch):
     evaluation_script.load_environment()
 
     assert calls == [(evaluation_script.ROOT / ".env", False)]
+
+
+def test_module3_status_accepts_safe_overlap_evidence(tmp_path):
+    candidate_path = tmp_path / "candidate-report.json"
+    candidate_path.write_text(
+        json.dumps(
+            {
+                "status": "engineering_preview_ready",
+                "safety": {
+                    "raw_identifiers_returned": False,
+                    "activation_or_export_performed": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    overlap_path = tmp_path / "overlap-report.json"
+    overlap_path.write_text(
+        json.dumps(
+            {
+                "status": "engineering_preview_ready",
+                "safety": {
+                    "raw_identifiers_returned": False,
+                    "membership_intersection_read": False,
+                    "overlap_rate_computed": False,
+                    "unique_reach_claimed": False,
+                    "cohort_sizes_summed": False,
+                    "candidate_lifecycle_mutated": False,
+                    "activation_or_export_performed": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = ProductionModule3StatusService(
+        environment={
+            "MODULE3_COHORT_EVIDENCE_PATH": str(candidate_path),
+            "MODULE3_OVERLAP_EVIDENCE_PATH": str(overlap_path),
+        }
+    ).status()
+
+    assert status["status"] == "module3_3_engineering_evidence_ready"
+    assert status["engineering_evidence_ready"] is True
+    assert status["module3_3_engineering_evidence_ready"] is True
+    assert status["components"]["module_3_3_overlap_and_deduplication"] is True
+
+
+def test_overlap_flag_without_evidence_fails_closed():
+    status = ProductionModule3StatusService(
+        environment={"MODULE3_OVERLAP_DEDUPLICATION_ENABLED": "true"}
+    ).status()
+    assert status["status"] == "unsafe_configuration_overlap_evidence_missing"
+
+
+def test_module3_overlap_migration_enforces_review_only_evidence():
+    sql = Path("migrations/0013_module3_overlap_deduplication.sql").read_text(
+        encoding="utf-8"
+    )
+    for value in (
+        "membership_intersection_read = FALSE",
+        "overlap_rate_computed = FALSE",
+        "unique_reach_claimed = FALSE",
+        "cohort_sizes_summed = FALSE",
+        "candidate_lifecycle_mutated = FALSE",
+        "lookalike_generation_performed = FALSE",
+        "activation_or_export_performed = FALSE",
+        "overlap_estimate_available = FALSE",
+        "eligible_for_activation = FALSE",
+        "eligible_for_export = FALSE",
+        "ENABLE ROW LEVEL SECURITY",
+        "FORCE ROW LEVEL SECURITY",
+        "prevent_module3_overlap_evidence_mutation",
+        "validate_module3_overlap_member_candidate",
+        "validate_module3_duplicate_suppression_candidate",
+        "REVOKE ALL ON audience_cohort_overlap_analysis_runs FROM PUBLIC",
+    ):
+        assert value in sql
+
+
+def test_module3_overlap_safe_defaults_are_disabled():
+    env_text = Path(".env.example").read_text(encoding="utf-8")
+    assert "MODULE3_OVERLAP_EVIDENCE_PATH=" in env_text
+    assert "MODULE3_OVERLAP_DEDUPLICATION_ENABLED=false" in env_text
