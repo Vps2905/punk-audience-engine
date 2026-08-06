@@ -58,21 +58,29 @@ def index_historical_features(args: argparse.Namespace) -> dict[str, Any]:
         os.getenv("ECHO_DATABASE_URL")
         or os.getenv("DATABASE_URL")
     )
-    feature_database_url = os.getenv(
+    feature_writer_database_url = os.getenv(
         "AUDIENCE_FEATURE_WRITER_DATABASE_URL"
+    )
+    feature_migration_database_url = os.getenv(
+        "AUDIENCE_FEATURE_MIGRATION_DATABASE_URL"
     )
     if not source_database_url:
         raise RuntimeError(
             "Set ECHO_DATABASE_URL or DATABASE_URL for the read-only "
             "historical source."
         )
-    if not feature_database_url:
+    if not feature_writer_database_url:
         raise RuntimeError(
             "Set AUDIENCE_FEATURE_WRITER_DATABASE_URL for Phase 2 imports."
         )
+    if not feature_migration_database_url:
+        raise RuntimeError(
+            "Set AUDIENCE_FEATURE_MIGRATION_DATABASE_URL for operator "
+            "schema verification before historical import."
+        )
     preflight = Phase2DatabasePreflightService().run(
         source_database_url=source_database_url,
-        feature_database_url=feature_database_url,
+        feature_database_url=feature_migration_database_url,
         punk_owned_target_confirmed=True,
     )
     if preflight.get("same_database_as_source"):
@@ -98,7 +106,7 @@ def index_historical_features(args: argparse.Namespace) -> dict[str, Any]:
         data_use_mode=args.data_use_mode,
     )
     receipt = PgvectorAudienceFeatureStore(
-        database_url=feature_database_url
+        database_url=feature_writer_database_url
     ).save_feature_set(feature_set)
     return {
         **receipt,

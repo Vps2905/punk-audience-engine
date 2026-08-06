@@ -22,13 +22,30 @@ def _args() -> Namespace:
 
 class FakePreflight:
     result: ClassVar[dict] = {}
+    calls: ClassVar[list[dict]] = []
 
-    def run(self, **_kwargs):
+    def run(self, **kwargs):
+        self.calls.append(dict(kwargs))
         return dict(self.result)
+
+
+def _configure_feature_databases(monkeypatch):
+    monkeypatch.setenv(
+        "AUDIENCE_FEATURE_WRITER_DATABASE_URL",
+        "configured-writer-target",
+    )
+    monkeypatch.setenv(
+        "AUDIENCE_FEATURE_MIGRATION_DATABASE_URL",
+        "configured-migration-target",
+    )
 
 
 def test_index_requires_explicit_feature_database(monkeypatch):
     monkeypatch.setenv("ECHO_DATABASE_URL", "configured-source")
+    monkeypatch.setenv(
+        "AUDIENCE_FEATURE_MIGRATION_DATABASE_URL",
+        "configured-migration-target",
+    )
     monkeypatch.delenv(
         "AUDIENCE_FEATURE_WRITER_DATABASE_URL",
         raising=False,
@@ -41,12 +58,28 @@ def test_index_requires_explicit_feature_database(monkeypatch):
         script.index_historical_features(_args())
 
 
-def test_index_rejects_same_database_before_snapshot_read(monkeypatch):
+def test_index_requires_explicit_migration_database(monkeypatch):
     monkeypatch.setenv("ECHO_DATABASE_URL", "configured-source")
     monkeypatch.setenv(
         "AUDIENCE_FEATURE_WRITER_DATABASE_URL",
-        "configured-target",
+        "configured-writer-target",
     )
+    monkeypatch.delenv(
+        "AUDIENCE_FEATURE_MIGRATION_DATABASE_URL",
+        raising=False,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="AUDIENCE_FEATURE_MIGRATION_DATABASE_URL",
+    ):
+        script.index_historical_features(_args())
+
+
+def test_index_rejects_same_database_before_snapshot_read(monkeypatch):
+    monkeypatch.setenv("ECHO_DATABASE_URL", "configured-source")
+    _configure_feature_databases(monkeypatch)
+    FakePreflight.calls = []
     FakePreflight.result = {
         "status": "phase2_schema_ready",
         "same_database_as_source": True,
@@ -68,10 +101,8 @@ def test_index_rejects_same_database_before_snapshot_read(monkeypatch):
 
 def test_index_rejects_unverified_feature_schema(monkeypatch):
     monkeypatch.setenv("ECHO_DATABASE_URL", "configured-source")
-    monkeypatch.setenv(
-        "AUDIENCE_FEATURE_WRITER_DATABASE_URL",
-        "configured-target",
-    )
+    _configure_feature_databases(monkeypatch)
+    FakePreflight.calls = []
     FakePreflight.result = {
         "status": "ready_for_approved_migration",
         "same_database_as_source": False,
@@ -95,10 +126,8 @@ def test_index_reads_only_explicit_reviewed_snapshot_after_preflight(
     monkeypatch,
 ):
     monkeypatch.setenv("ECHO_DATABASE_URL", "configured-source")
-    monkeypatch.setenv(
-        "AUDIENCE_FEATURE_WRITER_DATABASE_URL",
-        "configured-target",
-    )
+    _configure_feature_databases(monkeypatch)
+    FakePreflight.calls = []
     FakePreflight.result = {
         "status": "phase2_schema_ready",
         "same_database_as_source": False,
@@ -160,9 +189,16 @@ def test_index_reads_only_explicit_reviewed_snapshot_after_preflight(
 
     receipt = script.index_historical_features(_args())
 
+    assert FakePreflight.calls == [
+        {
+            "source_database_url": "configured-source",
+            "feature_database_url": "configured-migration-target",
+            "punk_owned_target_confirmed": True,
+        }
+    ]
     assert calls["job_id"] == "reviewed-snapshot-id"
     assert calls["source_database_url"] == "configured-source"
-    assert calls["feature_database_url"] == "configured-target"
+    assert calls["feature_database_url"] == "configured-writer-target"
     assert calls["feature_set"] == "safe-feature-set"
     assert receipt["status"] == "saved"
     assert receipt["activation_blocked"] is True

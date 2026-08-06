@@ -284,9 +284,13 @@ PYTHONPATH=. python scripts/index_historical_audience_features.py \
   --job-id exact-reviewed-snapshot-id
 ```
 
-The exact snapshot is mandatory. The command fails closed when
-`AUDIENCE_FEATURE_WRITER_DATABASE_URL` is absent and never falls back to either
-the reader identity or historical source. It prints a safe receipt and never
+The exact snapshot is mandatory. This operator command uses
+`AUDIENCE_FEATURE_MIGRATION_DATABASE_URL` only to attest the migration ledger
+and schema through the privileged preflight, then uses
+`AUDIENCE_FEATURE_WRITER_DATABASE_URL` only for the tenant-scoped feature
+write. Runtime reader and writer roles must remain unable to read the migration
+ledger. The command fails closed when either URL is absent and never falls back
+to the reader identity or historical source. It prints a safe receipt and never
 prints URLs, credentials, raw source values, or embeddings.
 
 The command is idempotent for the same source fingerprint.
