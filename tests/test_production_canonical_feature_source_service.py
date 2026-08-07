@@ -114,3 +114,19 @@ def test_source_manifest_rejects_unbounded_or_unsupported_input():
             source_size_bytes=200,
             max_object_bytes=100,
         )
+
+
+def test_content_addressed_canonical_object_does_not_send_fake_s3_version_id():
+    payload = _payload()
+    store = FakeObjectStore(payload)
+    manifest = replace(
+        _manifest(payload),
+        source_version=hashlib.sha256(payload).hexdigest(),
+        source_version_kind="content_sha256",
+    )
+
+    ProductionCanonicalFeatureSourceService(object_store=store).read(manifest)
+
+    descriptor, _ = store.calls[0]
+    assert descriptor.version_id is None
+    assert descriptor.checksum_sha256 == hashlib.sha256(payload).hexdigest()

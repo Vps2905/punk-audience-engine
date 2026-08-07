@@ -7,7 +7,10 @@ def test_legacy_ingest_status_requires_api_key(monkeypatch):
     monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
     client = TestClient(app)
 
-    response = client.get("/status/some_job")
+    response = client.get(
+        "/status/some_job",
+        headers={"x-audience-tenant-id": "tenant-a"},
+    )
 
     assert response.status_code in {401, 403}
 
@@ -16,7 +19,10 @@ def test_legacy_synthetic_generate_requires_api_key(monkeypatch):
     monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
     client = TestClient(app)
 
-    response = client.post("/synthetic/generate/some_job")
+    response = client.post(
+        "/synthetic/generate/some_job",
+        headers={"x-audience-tenant-id": "tenant-a"},
+    )
 
     assert response.status_code in {401, 403}
 
@@ -25,7 +31,10 @@ def test_legacy_full_pipeline_requires_api_key(monkeypatch):
     monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
     client = TestClient(app)
 
-    response = client.post("/audience/generate")
+    response = client.post(
+        "/audience/generate",
+        headers={"x-audience-tenant-id": "tenant-a"},
+    )
 
     assert response.status_code in {401, 403, 422}
 
@@ -53,7 +62,10 @@ def test_legacy_synthetic_generate_allows_valid_api_key(monkeypatch):
 
     response = client.post(
         "/synthetic/generate/some_job?num_rows=10&use_sdv=true",
-        headers={"x-audience-api-key": "test-key"},
+        headers={
+            "x-audience-api-key": "test-key",
+            "x-audience-tenant-id": "tenant-a",
+        },
     )
 
     assert response.status_code == 200
@@ -67,6 +79,7 @@ def test_legacy_meta_export_requires_api_key(monkeypatch):
 
     response = client.post(
         "/export/meta/cohort_1",
+        headers={"x-audience-tenant-id": "tenant-a"},
     )
 
     assert response.status_code in {401, 403}
@@ -78,6 +91,7 @@ def test_legacy_meta_export_requires_api_key(monkeypatch):
 
     response = client.post(
         "/export/meta/cohort_1",
+        headers={"x-audience-tenant-id": "tenant-a"},
     )
 
     assert response.status_code in {401, 403}
@@ -89,6 +103,7 @@ def test_legacy_meta_export_requires_api_key(monkeypatch):
 
     response = client.post(
         "/export/meta/cohort_1",
+        headers={"x-audience-tenant-id": "tenant-a"},
     )
 
     assert response.status_code in {401, 403}

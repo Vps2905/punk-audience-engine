@@ -2,6 +2,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import audience_intelligence_jobs as jobs
+from app.core.audience_request_context import AudienceRequestContext
 
 
 class FakeJobStore:
@@ -9,11 +10,13 @@ class FakeJobStore:
         self.record = record
         self.saved = None
 
-    def get(self, job_id):
+    def get(self, job_id, *, tenant_id):
         assert job_id == self.record["job_id"]
+        assert tenant_id == "tenant-a"
         return self.record
 
-    def save(self, record):
+    def save(self, record, *, tenant_id):
+        assert tenant_id == "tenant-a"
         self.saved = record
 
 
@@ -29,7 +32,8 @@ class FakeApprovedHistory:
             "meta_upload_performed": False,
         }
 
-    def get_run(self, run_id):
+    def get_run(self, run_id, *, tenant_id):
+        assert tenant_id == "tenant-a"
         return {
             "enabled": True,
             "status": "ok",
@@ -64,7 +68,8 @@ class FakeBlockedHistory:
             "meta_upload_performed": False,
         }
 
-    def get_run(self, run_id):
+    def get_run(self, run_id, *, tenant_id):
+        assert tenant_id == "tenant-a"
         return {
             "enabled": True,
             "status": "ok",
@@ -84,6 +89,7 @@ class FakeBlockedHistory:
 
 def _completed_record():
     return {
+        "tenant_id": "tenant-a",
         "job_id": "job_123",
         "status": "completed",
         "result": {
@@ -112,6 +118,10 @@ def test_async_job_approval_delegates_to_run_history(monkeypatch):
         jobs.ApprovalRequest(
             approver="reviewer",
             note="approved",
+        ),
+        AudienceRequestContext(
+            tenant_id="tenant-a",
+            request_id="request-approval",
         ),
     )
 
@@ -143,6 +153,10 @@ def test_async_job_approval_preserves_fail_closed_decision(
             jobs.ApprovalRequest(
                 approver="reviewer",
                 note="attempt",
+            ),
+            AudienceRequestContext(
+                tenant_id="tenant-a",
+                request_id="request-blocked",
             ),
         )
 

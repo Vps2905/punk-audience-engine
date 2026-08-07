@@ -330,6 +330,20 @@ class ProviderObjectIngestionGatewayService:
                 privacy_pipeline_started=True,
             )
 
+        canonical_checksum = hashlib.sha256(canonical_payload).hexdigest()
+        canonical_s3_version = str(
+            canonical_receipt.get("version_id") or ""
+        ).strip()
+        canonical_version = canonical_s3_version or canonical_checksum
+        canonical_version_kind = (
+            "s3_version_id"
+            if canonical_s3_version
+            else "content_sha256"
+        )
+        canonical_source_latest_at = (
+            manifest.event_time_end
+            or descriptor.last_modified
+        )
         record = self._state.transition(
             ingestion_id,
             status="completed",
@@ -339,10 +353,23 @@ class ProviderObjectIngestionGatewayService:
             input_rows=len(rows),
             output_rows=len(safe_rows),
             metadata_update={
-                "canonical_checksum_sha256": hashlib.sha256(
-                    canonical_payload
-                ).hexdigest(),
-                "privacy_controls": list(privacy_result.get("privacy_controls") or []),
+                "canonical_checksum_sha256": canonical_checksum,
+                "canonical_object_version": canonical_version,
+                "canonical_object_version_kind": canonical_version_kind,
+                "canonical_size_bytes": len(canonical_payload),
+                "canonical_source_latest_at": canonical_source_latest_at,
+                "privacy_controls": list(
+                    privacy_result.get("privacy_controls") or []
+                ),
+                "canonical_privacy_controls": [
+                    "daily_contribution_bounding",
+                    "k_anonymity",
+                    "differential_privacy",
+                    "no_identifier_output",
+                    "lineage_logging",
+                ],
+                "privacy_policy_version": "provider-privacy-pipeline-v1",
+                "rights_status": "permitted",
             },
         )
         return self._result(

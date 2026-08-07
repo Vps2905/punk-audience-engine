@@ -6,6 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.core.api_key_auth import require_audience_api_key
+from app.core.audience_request_context import (
+    AudienceRequestContext,
+    require_authenticated_audience_request,
+)
 from app.services.audience_run_history_service import AudienceRunHistoryService
 
 
@@ -28,8 +32,12 @@ def list_runs(
     offset: int = Query(default=0, ge=0),
     approval_status: Optional[str] = None,
     status: Optional[str] = None,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
 ) -> Dict[str, Any]:
     result = AudienceRunHistoryService().list_runs(
+        tenant_id=context.tenant_id,
         limit=limit,
         offset=offset,
         approval_status=approval_status,
@@ -43,8 +51,16 @@ def list_runs(
 
 
 @router.get("/{run_id}")
-def get_run(run_id: str) -> Dict[str, Any]:
-    result = AudienceRunHistoryService().get_run(run_id)
+def get_run(
+    run_id: str,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
+    result = AudienceRunHistoryService().get_run(
+        run_id,
+        tenant_id=context.tenant_id,
+    )
 
     if result.get("status") == "skipped":
         raise HTTPException(status_code=503, detail=result)
@@ -76,8 +92,12 @@ def list_run_cohorts(
         default=0,
         ge=0,
     ),
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
 ) -> Dict[str, Any]:
     result = AudienceRunHistoryService().list_cohorts(
+        tenant_id=context.tenant_id,
         run_id=run_id,
         location=location,
         poi_type=poi_type,
@@ -104,18 +124,39 @@ def list_run_cohorts(
 
 
 @router.get("/{run_id}/audit")
-def get_run_audit(run_id: str) -> Dict[str, Any]:
-    result = AudienceRunHistoryService().get_audit(run_id)
+def get_run_audit(
+    run_id: str,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
+    result = AudienceRunHistoryService().get_audit(
+        run_id,
+        tenant_id=context.tenant_id,
+    )
 
     if result.get("status") == "skipped":
         raise HTTPException(status_code=503, detail=result)
+
+    if result.get("status") == "not_found":
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run not found: {run_id}",
+        )
 
     return result
 
 
 @router.post("/{run_id}/approve")
-def approve_run(run_id: str, request: RunDecisionRequest) -> Dict[str, Any]:
+def approve_run(
+    run_id: str,
+    request: RunDecisionRequest,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
     result = AudienceRunHistoryService().approve_run(
+        tenant_id=context.tenant_id,
         run_id=run_id,
         actor=request.actor,
         note=request.note,
@@ -138,8 +179,15 @@ def approve_run(run_id: str, request: RunDecisionRequest) -> Dict[str, Any]:
 
 
 @router.post("/{run_id}/reject")
-def reject_run(run_id: str, request: RunDecisionRequest) -> Dict[str, Any]:
+def reject_run(
+    run_id: str,
+    request: RunDecisionRequest,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
     result = AudienceRunHistoryService().reject_run(
+        tenant_id=context.tenant_id,
         run_id=run_id,
         actor=request.actor,
         note=request.note,

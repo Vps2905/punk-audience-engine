@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 from app.agents.audience_intelligence_orchestrator_agent import AudienceIntelligenceOrchestratorAgent
 from app.agents.audience_supervisor_agent import build_audience_execution_agent
 from app.core.audience_job_store import AudienceJobStore
+from app.core.audience_request_context import (
+    AudienceRequestContext,
+    require_authenticated_audience_request,
+)
 
 from app.core.api_key_auth import require_audience_api_key
 from app.core.production_guardrails import local_file_storage_allowed
@@ -436,13 +440,14 @@ def _collect_job_approval_blockers(
     return list(dict.fromkeys(blockers))
 
 
-def _run_job_background(job_id: str) -> None:
-    record = job_store.get(job_id)
+def _run_job_background(job_id: str, tenant_id: str) -> None:
+    record = job_store.get(job_id, tenant_id=tenant_id)
     payload = record["payload"]
 
     try:
         job_store.update_status(
             job_id,
+            tenant_id=tenant_id,
             status="running",
             stage="orchestration_started",
             message="Running Audience Intelligence pipeline.",
@@ -488,7 +493,9 @@ def _run_job_background(job_id: str) -> None:
 
         # Async jobs must persist their completed run before they can be
         # approved through the DB-backed run-history workflow.
+        result["tenant_id"] = tenant_id
         run_history = AudienceRunHistoryService().persist_run(
+            tenant_id=tenant_id,
             final_summary=result,
         )
         result["run_history"] = run_history
@@ -508,6 +515,7 @@ def _run_job_background(job_id: str) -> None:
 
         job_store.update_status(
             job_id,
+            tenant_id=tenant_id,
             status="completed",
             stage="completed",
             message="Audience Intelligence job completed.",
@@ -517,6 +525,7 @@ def _run_job_background(job_id: str) -> None:
     except Exception as exc:
         job_store.update_status(
             job_id,
+            tenant_id=tenant_id,
             status="failed",
             stage="failed",
             message="Audience Intelligence job failed.",
@@ -525,15 +534,28 @@ def _run_job_background(job_id: str) -> None:
 
 
 @router.post("/run")
-def run_job(request: AudienceJobRequest, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+def run_job(
+    request: AudienceJobRequest,
+    background_tasks: BackgroundTasks,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
     if request.source == "safe_artifact" and not request.safe_cohort_path:
         raise HTTPException(
             status_code=400,
             detail="safe_cohort_path is required when source is safe_artifact.",
         )
 
-    record = job_store.create_job(request.model_dump())
-    background_tasks.add_task(_run_job_background, record["job_id"])
+    record = job_store.create_job(
+        request.model_dump(),
+        tenant_id=context.tenant_id,
+    )
+    background_tasks.add_task(
+        _run_job_background,
+        record["job_id"],
+        context.tenant_id,
+    )
 
     return {
         "status": "queued",
@@ -544,9 +566,17 @@ def run_job(request: AudienceJobRequest, background_tasks: BackgroundTasks) -> D
 
 
 @router.get("/status/{job_id}")
-def get_status(job_id: str) -> Dict[str, Any]:
+def get_status(
+    job_id: str,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
     try:
-        record = job_store.get(job_id)
+        record = job_store.get(
+            job_id,
+            tenant_id=context.tenant_id,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -561,9 +591,17 @@ def get_status(job_id: str) -> Dict[str, Any]:
 
 
 @router.get("/result/{job_id}")
-def get_result(job_id: str) -> Dict[str, Any]:
+def get_result(
+    job_id: str,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
     try:
-        record = job_store.get(job_id)
+        record = job_store.get(
+            job_id,
+            tenant_id=context.tenant_id,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -587,9 +625,15 @@ def get_result(job_id: str) -> Dict[str, Any]:
 def approve_job_export(
     job_id: str,
     request: ApprovalRequest,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
 ) -> Dict[str, Any]:
     try:
-        record = job_store.get(job_id)
+        record = job_store.get(
+            job_id,
+            tenant_id=context.tenant_id,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -610,6 +654,7 @@ def approve_job_export(
 
     service = AudienceRunHistoryService()
     decision = service.approve_run(
+        tenant_id=context.tenant_id,
         run_id=run_id,
         actor=request.approver,
         note=request.note,
@@ -627,7 +672,10 @@ def approve_job_export(
     if decision_status == "failed":
         raise HTTPException(status_code=500, detail=decision)
 
-    refreshed = service.get_run(run_id)
+    refreshed = service.get_run(
+        run_id,
+        tenant_id=context.tenant_id,
+    )
 
     if refreshed.get("status") == "ok":
         run = refreshed.get("run") or {}
@@ -683,7 +731,10 @@ def approve_job_export(
 
     result["approval_decision"] = decision
     record["result"] = result
-    job_store.save(record)
+    job_store.save(
+        record,
+        tenant_id=context.tenant_id,
+    )
 
     response = {
         "job_id": job_id,

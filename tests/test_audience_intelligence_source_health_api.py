@@ -7,7 +7,10 @@ def test_source_health_requires_api_key(monkeypatch):
     monkeypatch.setenv("AUDIENCE_API_KEY", "test-key")
 
     client = TestClient(app)
-    response = client.get("/api/audience-intelligence/source-health")
+    response = client.get(
+        "/api/audience-intelligence/source-health",
+        headers={"x-audience-tenant-id": "tenant-a"},
+    )
 
     assert response.status_code in {401, 403}
 
@@ -28,7 +31,10 @@ def test_source_health_reports_missing_source_db_without_leaking_secrets(monkeyp
     client = TestClient(app)
     response = client.get(
         "/api/audience-intelligence/source-health",
-        headers={"x-audience-api-key": "test-key"},
+        headers={
+            "x-audience-api-key": "test-key",
+            "x-audience-tenant-id": "tenant-a",
+        },
     )
 
     assert response.status_code == 200

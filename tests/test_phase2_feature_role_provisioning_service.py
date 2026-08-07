@@ -87,6 +87,8 @@ class FakeConnection:
             )
         if "AS registry_ready" in sql:
             return FakeResult(row={"registry_ready": True})
+        if "AS workflow_ready" in sql:
+            return FakeResult(row={"workflow_ready": True})
         if "role.rolsuper" in sql:
             writer = self.role_type == "writer"
             return FakeResult(
@@ -115,6 +117,15 @@ class FakeConnection:
                     "can_delete_feature_sets": False,
                     "can_delete_feature_vectors": False,
                     "can_read_migration_ledger": False,
+                    "workflow_tables_present": True,
+                    "can_select_fresh_data_workflows": writer,
+                    "can_insert_fresh_data_workflows": writer,
+                    "can_update_fresh_data_workflows": writer,
+                    "can_delete_fresh_data_workflows": False,
+                    "can_select_fresh_data_workflow_events": writer,
+                    "can_insert_fresh_data_workflow_events": writer,
+                    "can_mutate_fresh_data_workflow_events": False,
+                    "can_use_fresh_data_workflow_event_sequence": writer,
                 }
             )
         if "set_config" in sql:
@@ -273,6 +284,15 @@ def test_roles_are_least_privilege_and_rls_isolation_is_verified():
         "GRANT SELECT, INSERT, UPDATE ON "
         "public.audience_feature_build_jobs"
     ) in admin_sql
+    assert (
+        "GRANT SELECT, INSERT, UPDATE ON "
+        "public.audience_fresh_data_workflows"
+    ) in admin_sql
+    assert (
+        "GRANT SELECT, INSERT ON "
+        "public.audience_fresh_data_workflow_events"
+    ) in admin_sql
+    assert "fresh_data_workflow_events_event_id_seq" in admin_sql
     assert "FROM pg_auth_members" in admin_sql
     assert "reader-test-value" not in str(result)
     assert "writer-test-value" not in str(result)

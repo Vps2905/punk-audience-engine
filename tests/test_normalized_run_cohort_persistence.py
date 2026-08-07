@@ -104,6 +104,7 @@ def test_normalized_cohort_columns_are_inserted():
 
     service._replace_cohorts(
         conn,
+        "tenant-a",
         "run_module_4",
         rows,
     )
@@ -111,7 +112,7 @@ def test_normalized_cohort_columns_are_inserted():
     insert_calls = [
         call
         for call in conn.calls
-        if "INSERT INTO audience_run_cohorts"
+        if "INSERT INTO public.audience_run_cohorts"
         in call["sql"]
     ]
 
@@ -120,6 +121,7 @@ def test_normalized_cohort_columns_are_inserted():
     params = insert_calls[0]["params"]
 
     assert params["export_cohort_id"] == "cohort_1"
+    assert params["tenant_id"] == "tenant-a"
     assert params["lookback_bucket"] == "31_90d"
     assert params["management_quality_score"] == 0.82
     assert params["approval_status"] == (

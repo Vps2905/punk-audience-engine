@@ -125,6 +125,7 @@ class CanonicalFeatureSourceManifest:
     daypart_column: str | None = None
     lookback_bucket_column: str | None = None
     privacy_window_column: str | None = "privacy_window"
+    source_version_kind: str = "s3_version_id"
     contract_version: str = "canonical-feature-source-v1"
     data_format: str = "jsonl"
     source_size_bytes: int | None = None
@@ -155,6 +156,21 @@ class CanonicalFeatureSourceManifest:
         if not source_version:
             raise ValueError("source_version is required.")
         object.__setattr__(self, "source_version", source_version)
+        source_version_kind = normalize_taxonomy_value(
+            self.source_version_kind
+        )
+        if source_version_kind not in {
+            "s3_version_id",
+            "content_sha256",
+        }:
+            raise ValueError(
+                "source_version_kind must be s3_version_id or content_sha256."
+            )
+        object.__setattr__(
+            self,
+            "source_version_kind",
+            source_version_kind,
+        )
         fingerprint = str(self.source_fingerprint or "").strip().lower()
         if not _SHA256_RE.fullmatch(fingerprint):
             raise ValueError(

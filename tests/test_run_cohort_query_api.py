@@ -1,4 +1,5 @@
 from app.api import audience_intelligence_run_history as api
+from app.core.audience_request_context import AudienceRequestContext
 
 
 class FakeService:
@@ -34,10 +35,17 @@ def test_cohort_query_api_delegates_filters(monkeypatch):
         min_quality=0.5,
         limit=25,
         offset=0,
+        context=AudienceRequestContext(
+            tenant_id="tenant-a",
+            request_id="request-1",
+        ),
     )
 
     assert result["status"] == "ok"
     assert result["count"] == 1
+    assert result["cohorts"][0]["location_name"] == (
+        "montreal downtown"
+    )
     assert (
         result["cohorts"][0]["export_cohort_id"]
         == "cohort_1"

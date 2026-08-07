@@ -16,9 +16,26 @@ services:
       EMBEDDING_BACKEND: "sklearn_hashing"
       ALL_SAFE_COHORT_EMBEDDING_STORE: "postgres"
       AUDIENCE_JOB_STORE_BACKEND: "postgres"
+      SECURITY_HEADERS_ENABLED: "true"
+      EXPOSE_API_DOCS: "false"
+      PRODUCTION_ALLOWED_HOSTS: "${PRODUCTION_ALLOWED_HOSTS:-localhost,127.0.0.1}"
+      MAX_REQUEST_BODY_BYTES: "10485760"
+      REQUIRE_DATABASE_TLS: "true"
+      REQUIRE_OUTBOUND_TLS: "true"
+      CONTAINER_RUNTIME_NON_ROOT: "true"
+      CONTAINER_ROOT_FILESYSTEM_READ_ONLY: "true"
+      CONTAINER_NO_NEW_PRIVILEGES: "true"
     ports:
       - "8000:8000"
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
@@ -39,9 +56,20 @@ services:
       PROVIDER_GATEWAY_ENABLED: "true"
       ALLOW_LOCAL_FILE_STORAGE: "false"
       ALLOW_DEMO_ROUTES: "false"
+      CONTAINER_RUNTIME_NON_ROOT: "true"
+      CONTAINER_ROOT_FILESYSTEM_READ_ONLY: "true"
+      CONTAINER_NO_NEW_PRIVILEGES: "true"
     command:
       - python
       - scripts/run_provider_ingestion_worker.py
     healthcheck:
       disable: true
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true

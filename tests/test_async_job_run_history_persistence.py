@@ -6,6 +6,7 @@ class FakeJobStore:
 
     def __init__(self):
         self.record = {
+            "tenant_id": "tenant-a",
             "job_id": "job_async_1",
             "status": "queued",
             "payload": {
@@ -17,20 +18,23 @@ class FakeJobStore:
         }
         self.updates = []
 
-    def get(self, job_id):
+    def get(self, job_id, *, tenant_id):
         assert job_id == "job_async_1"
+        assert tenant_id == "tenant-a"
         return self.record
 
     def update_status(
         self,
         job_id,
         *,
+        tenant_id,
         status,
         stage,
         message,
         result=None,
         error=None,
     ):
+        assert tenant_id == "tenant-a"
         self.record["status"] = status
 
         if result is not None:
@@ -88,7 +92,8 @@ class PersistedHistory:
     def __init__(self):
         self.final_summary = None
 
-    def persist_run(self, *, final_summary):
+    def persist_run(self, *, tenant_id, final_summary):
+        assert tenant_id == "tenant-a"
         self.final_summary = final_summary
         return {
             "enabled": True,
@@ -98,7 +103,8 @@ class PersistedHistory:
 
 
 class FailedHistory:
-    def persist_run(self, *, final_summary):
+    def persist_run(self, *, tenant_id, final_summary):
+        assert tenant_id == "tenant-a"
         return {
             "enabled": True,
             "status": "failed",
@@ -138,10 +144,11 @@ def test_async_job_persists_run_history_before_completion(
     history = PersistedHistory()
     _patch_common(monkeypatch, store, history)
 
-    jobs._run_job_background("job_async_1")
+    jobs._run_job_background("job_async_1", "tenant-a")
 
     assert history.final_summary is not None
     assert history.final_summary["run_id"] == "run_async_1"
+    assert history.final_summary["tenant_id"] == "tenant-a"
     assert (
         history.final_summary["business_summary"]
         == "Safe business summary"
@@ -167,7 +174,7 @@ def test_async_postgres_job_fails_when_run_history_fails(
     history = FailedHistory()
     _patch_common(monkeypatch, store, history)
 
-    jobs._run_job_background("job_async_1")
+    jobs._run_job_background("job_async_1", "tenant-a")
 
     assert store.updates[-1]["status"] == "failed"
     assert store.updates[-1]["error"] == (

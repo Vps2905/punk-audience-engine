@@ -8,6 +8,9 @@ from sqlalchemy import create_engine, text
 from app.services.audience_run_history_service import AudienceRunHistoryService
 
 
+TENANT_ID = "tenant-integration"
+
+
 def _postgres_test_db_url() -> str:
     return os.getenv("AUDIENCE_TEST_DATABASE_URL", "")
 
@@ -111,10 +114,11 @@ def test_approval_spends_privacy_budget_and_records_audit(postgres_history_servi
         max_budget=5.0,
     )
 
-    persisted = service.persist_run(final_summary=summary, selected_cohorts=summary.get("safe_export_cohorts"))
+    persisted = service.persist_run(tenant_id=TENANT_ID, final_summary=summary, selected_cohorts=summary.get("safe_export_cohorts"))
     run_id = persisted.get("run_id") or summary["run_id"]
 
     approval = service.approve_run(
+        tenant_id=TENANT_ID,
         run_id=run_id,
         actor="privacy_test_reviewer",
         note="integration approval should spend budget",
@@ -125,7 +129,7 @@ def test_approval_spends_privacy_budget_and_records_audit(postgres_history_servi
     assert approval["approval_status"] == "approved"
     assert approval["downstream_export_enabled"] is True
 
-    audit = service.get_audit(run_id)
+    audit = service.get_audit(run_id, tenant_id=TENANT_ID)
     audit_text = json.dumps(audit, default=str)
 
     assert "privacy_budget_spent" in audit_text
@@ -146,10 +150,11 @@ def test_approval_blocks_when_privacy_budget_exceeded(postgres_history_service):
     second_summary["run_id"] = "test_run_budget_second"
     second_summary["safe_export_cohorts"][0]["cohort_id"] = "test_run_budget_second_cohort_1"
 
-    first_persisted = service.persist_run(final_summary=first_summary, selected_cohorts=first_summary.get("safe_export_cohorts"))
+    first_persisted = service.persist_run(tenant_id=TENANT_ID, final_summary=first_summary, selected_cohorts=first_summary.get("safe_export_cohorts"))
     first_run_id = first_persisted.get("run_id") or first_summary["run_id"]
 
     first_approval = service.approve_run(
+        tenant_id=TENANT_ID,
         run_id=first_run_id,
         actor="privacy_test_reviewer",
         note="first approval should spend budget",
@@ -159,10 +164,11 @@ def test_approval_blocks_when_privacy_budget_exceeded(postgres_history_service):
     assert first_approval["status"] == "approved"
     assert first_approval["downstream_export_enabled"] is True
 
-    second_persisted = service.persist_run(final_summary=second_summary, selected_cohorts=second_summary.get("safe_export_cohorts"))
+    second_persisted = service.persist_run(tenant_id=TENANT_ID, final_summary=second_summary, selected_cohorts=second_summary.get("safe_export_cohorts"))
     second_run_id = second_persisted.get("run_id") or second_summary["run_id"]
 
     second_approval = service.approve_run(
+        tenant_id=TENANT_ID,
         run_id=second_run_id,
         actor="privacy_test_reviewer",
         note="second approval should be blocked by budget",
@@ -174,7 +180,7 @@ def test_approval_blocks_when_privacy_budget_exceeded(postgres_history_service):
     assert second_approval["downstream_export_enabled"] is False
     assert "Privacy budget exceeded." in second_approval["blockers"]
 
-    audit = service.get_audit(second_run_id)
+    audit = service.get_audit(second_run_id, tenant_id=TENANT_ID)
     audit_text = json.dumps(audit, default=str)
 
     assert "privacy_budget_blocked" in audit_text
@@ -192,10 +198,11 @@ def test_approval_without_exported_cohorts_does_not_spend_privacy_budget(postgre
     )
     summary["safe_export_cohorts"] = []
 
-    persisted = service.persist_run(final_summary=summary)
+    persisted = service.persist_run(tenant_id=TENANT_ID, final_summary=summary)
     run_id = persisted.get("run_id") or summary["run_id"]
 
     approval = service.approve_run(
+        tenant_id=TENANT_ID,
         run_id=run_id,
         actor="privacy_test_reviewer",
         note="should block before spending budget",
@@ -205,7 +212,7 @@ def test_approval_without_exported_cohorts_does_not_spend_privacy_budget(postgre
     assert approval["status"] == "blocked"
     assert approval["reason"] == "no_exported_cohorts_to_approve"
 
-    audit = service.get_audit(run_id)
+    audit = service.get_audit(run_id, tenant_id=TENANT_ID)
     audit_text = json.dumps(audit, default=str)
 
     assert "approval_blocked" in audit_text

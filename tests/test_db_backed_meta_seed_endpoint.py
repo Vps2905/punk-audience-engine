@@ -2,6 +2,13 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import audience_intelligence_modules as module
+from app.core.audience_request_context import AudienceRequestContext
+
+
+CONTEXT = AudienceRequestContext(
+    tenant_id="tenant-a",
+    request_id="request-meta",
+)
 
 
 class FakeHistory:
@@ -9,8 +16,9 @@ class FakeHistory:
         self.run = run
         self.events = []
 
-    def get_run(self, run_id):
+    def get_run(self, run_id, *, tenant_id):
         assert run_id == "run_1"
+        assert tenant_id == "tenant-a"
         return {
             "enabled": True,
             "status": "ok",
@@ -20,6 +28,7 @@ class FakeHistory:
     def record_event(
         self,
         *,
+        tenant_id,
         run_id,
         event_type,
         actor,
@@ -27,6 +36,7 @@ class FakeHistory:
     ):
         self.events.append(
             {
+                "tenant_id": tenant_id,
                 "run_id": run_id,
                 "event_type": event_type,
                 "actor": actor,
@@ -101,6 +111,7 @@ def test_db_meta_seed_requires_approved_run(monkeypatch):
                 run_id="run_1",
                 actor="reviewer",
             ),
+            CONTEXT,
         )
 
     assert exc_info.value.status_code == 403
@@ -124,6 +135,7 @@ def test_db_meta_seed_generated_in_memory(monkeypatch):
             run_id="run_1",
             actor="reviewer",
         ),
+        CONTEXT,
     )
 
     assert result["status"] == "completed"
@@ -160,6 +172,7 @@ def test_production_local_meta_path_is_blocked(monkeypatch):
             module.MetaExportRequest(
                 safe_export_dir="/tmp/export",
             ),
+            CONTEXT,
         )
 
     assert exc_info.value.status_code == 400

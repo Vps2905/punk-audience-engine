@@ -79,7 +79,11 @@ def test_module3_safe_defaults_and_router_registration():
 
     main_text = Path("app/main.py").read_text(encoding="utf-8")
     assert "audience_intelligence_module3_status_router" in main_text
-    assert "app.include_router(audience_intelligence_module3_status_router)" in main_text
+    assert (
+        "_include_audience_router("
+        "audience_intelligence_module3_status_router)"
+        in main_text
+    )
 
 
 def test_module3_evaluation_script_loads_repository_dotenv(monkeypatch):
@@ -148,6 +152,40 @@ def test_overlap_flag_without_evidence_fails_closed():
         environment={"MODULE3_OVERLAP_DEDUPLICATION_ENABLED": "true"}
     ).status()
     assert status["status"] == "unsafe_configuration_overlap_evidence_missing"
+
+
+def test_module3_milestone_booleans_require_upstream_evidence(tmp_path):
+    lookalike_path = tmp_path / "lookalike-report.json"
+    lookalike_path.write_text(
+        json.dumps(
+            {
+                "status": "engineering_preview_ready",
+                "safety": {
+                    "raw_identifiers_returned": False,
+                    "audience_membership_read": False,
+                    "membership_similarity_computed": False,
+                    "audience_membership_generated": False,
+                    "overlap_rate_computed": False,
+                    "unique_reach_claimed": False,
+                    "cohort_sizes_summed": False,
+                    "candidate_lifecycle_mutated": False,
+                    "activation_or_export_performed": False,
+                    "downstream_export_enabled": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = ProductionModule3StatusService(
+        environment={
+            "MODULE3_LOOKALIKE_EVIDENCE_PATH": str(lookalike_path),
+        }
+    ).status()
+
+    assert status["status"] == "module3_1_2_evidence_pending"
+    assert status["module3_3_engineering_evidence_ready"] is False
+    assert status["module3_4_engineering_evidence_ready"] is False
 
 
 def test_module3_overlap_migration_enforces_review_only_evidence():

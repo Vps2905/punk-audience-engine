@@ -18,6 +18,10 @@ from app.agents.synthetic_engine_agent import SyntheticEngineAgent
 from app.agents.privacy_layer_agent import PrivacyLayerAgent
 
 from app.core.api_key_auth import require_audience_api_key
+from app.core.audience_request_context import (
+    AudienceRequestContext,
+    require_authenticated_audience_request,
+)
 from app.core.production_guardrails import local_file_storage_allowed
 from app.services.audience_run_history_service import AudienceRunHistoryService
 
@@ -471,12 +475,14 @@ def _build_meta_seed_payload(
 def _record_meta_audit(
     *,
     service: AudienceRunHistoryService,
+    tenant_id: str,
     run_id: str,
     event_type: str,
     actor: str,
     details: Dict[str, Any],
 ) -> Dict[str, Any]:
     result = service.record_event(
+        tenant_id=tenant_id,
         run_id=run_id,
         event_type=event_type,
         actor=actor,
@@ -497,6 +503,7 @@ def _record_meta_audit(
 
 def _export_meta_from_run_history(
     *,
+    tenant_id: str,
     cohort_id: str,
     request: MetaExportRequest,
 ) -> Dict[str, Any]:
@@ -509,7 +516,10 @@ def _export_meta_from_run_history(
         )
 
     service = AudienceRunHistoryService()
-    history = service.get_run(run_id)
+    history = service.get_run(
+        run_id,
+        tenant_id=tenant_id,
+    )
 
     status = history.get("status")
 
@@ -572,6 +582,7 @@ def _export_meta_from_run_history(
     if not approval_valid or not downstream_valid:
         audit = _record_meta_audit(
             service=service,
+            tenant_id=tenant_id,
             run_id=run_id,
             event_type="meta_seed_payload_blocked",
             actor=request.actor,
@@ -655,6 +666,7 @@ def _export_meta_from_run_history(
 
     audit = _record_meta_audit(
         service=service,
+        tenant_id=tenant_id,
         run_id=run_id,
         event_type="meta_seed_payload_generated",
         actor=request.actor,
@@ -831,6 +843,9 @@ def _export_meta_from_local_artifacts(
 def export_meta_seed_payload(
     cohort_id: str,
     request: MetaExportRequest,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
 ) -> Dict[str, Any]:
     """
     Build a gated Meta Advantage+ seed payload.
@@ -841,6 +856,7 @@ def export_meta_seed_payload(
     try:
         if request.run_id:
             return _export_meta_from_run_history(
+                tenant_id=context.tenant_id,
                 cohort_id=cohort_id,
                 request=request,
             )
@@ -857,4 +873,3 @@ def export_meta_seed_payload(
             status_code=500,
             detail=str(exc),
         ) from exc
-

@@ -106,6 +106,7 @@ def test_cohort_persistence_is_conflict_safe():
 
     service._replace_cohorts(
         conn,
+        "tenant-a",
         "run_module4d",
         rows,
     )
@@ -116,5 +117,6 @@ def test_cohort_persistence_is_conflict_safe():
 
     assert "pg_advisory_xact_lock" in all_sql
     assert "ON CONFLICT" in all_sql
+    assert "tenant_id" in all_sql
     assert "run_id" in all_sql
     assert "export_cohort_id" in all_sql

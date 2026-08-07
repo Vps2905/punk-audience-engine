@@ -5,6 +5,7 @@ ENV PYTHONUNBUFFERED=1
 ENV APP_HOME=/app
 ENV PYTHONPATH=/app
 ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
@@ -22,6 +23,12 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1+cpu \
     && grep -v -E '^(torch|torchvision|torchaudio|nvidia-|triton)([=<>~! ]|$)' requirements.txt > /tmp/requirements.runtime.txt \
     && python -m pip install -r /tmp/requirements.runtime.txt
+
+RUN groupadd --system --gid 10001 appgroup \
+    && useradd --system --uid 10001 --gid appgroup \
+       --home-dir /app --shell /usr/sbin/nologin appuser \
+    && apt-get purge -y --auto-remove build-essential \
+    && rm -rf /var/lib/apt/lists/* /tmp/requirements.runtime.txt
 
 COPY app /app/app
 
@@ -50,5 +57,10 @@ COPY scripts/provision_phase2_proposal_runtime_role.py ./scripts/provision_phase
 COPY scripts/apply_production_feature_build_migration.py ./scripts/apply_production_feature_build_migration.py
 COPY scripts/register_production_embedding_model.py ./scripts/register_production_embedding_model.py
 COPY scripts/build_production_audience_features.py ./scripts/build_production_audience_features.py
+COPY scripts/production_runtime_entrypoint.py ./scripts/production_runtime_entrypoint.py
+
+RUN chown -R appuser:appgroup /app
+
+USER 10001:10001
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

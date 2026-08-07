@@ -1,8 +1,16 @@
 # pyrefly: ignore [missing-import]
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings, ensure_data_dirs
+from app.core.audience_request_context import (
+    require_authenticated_audience_request,
+)
+from app.core.production_guardrails import (
+    demo_routes_allowed,
+    require_demo_routes_allowed,
+    require_legacy_local_routes_allowed,
+)
 from app.api.ingest_routes import router as ingest_router
 from app.api.synthetic_routes import router as synthetic_router
 from app.api.embedding_routes import router as embedding_router
@@ -10,28 +18,52 @@ from app.api.cohort_routes import router as cohort_router
 from app.api.export_routes import router as export_router
 from app.api.chat_routes import router as chat_router
 from app.api.full_pipeline_routes import router as full_pipeline_router
+from app.core.http_security import (
+    ProductionHTTPSecurityMiddleware,
+    production_api_docs_enabled,
+)
 
 ensure_data_dirs()
 
 from app.api.health_routes import router as health_router
+_api_docs_enabled = production_api_docs_enabled()
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="Privacy-safe audience ingestion, embeddings, cohorts, lookalikes, and Meta-safe export engine."
+    description="Privacy-safe audience ingestion, embeddings, cohorts, lookalikes, and Meta-safe export engine.",
+    docs_url="/docs" if _api_docs_enabled else None,
+    redoc_url="/redoc" if _api_docs_enabled else None,
+    openapi_url="/openapi.json" if _api_docs_enabled else None,
 )
+app.add_middleware(ProductionHTTPSecurityMiddleware)
+
+
+def _include_audience_router(
+    router,
+    *,
+    legacy_local_only: bool = False,
+    demo_only: bool = False,
+) -> None:
+    dependencies = [Depends(require_authenticated_audience_request)]
+    if legacy_local_only:
+        dependencies.append(Depends(require_legacy_local_routes_allowed))
+    if demo_only:
+        dependencies.append(Depends(require_demo_routes_allowed))
+    app.include_router(router, dependencies=dependencies)
 
 # Product-facing simple flow
-app.include_router(full_pipeline_router)
+_include_audience_router(full_pipeline_router, legacy_local_only=True)
 
 # Engineering / advanced module APIs
-app.include_router(ingest_router)
-app.include_router(synthetic_router)
-app.include_router(embedding_router)
-app.include_router(cohort_router)
-app.include_router(export_router)
-app.include_router(chat_router)
+_include_audience_router(ingest_router, legacy_local_only=True)
+_include_audience_router(synthetic_router, legacy_local_only=True)
+_include_audience_router(embedding_router, legacy_local_only=True)
+_include_audience_router(cohort_router, legacy_local_only=True)
+_include_audience_router(export_router, legacy_local_only=True)
+_include_audience_router(chat_router, legacy_local_only=True)
 
-app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
+if demo_routes_allowed():
+    app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 
 @app.get("/")
@@ -40,8 +72,8 @@ def root():
         "service": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "status": "running",
-        "ui": "http://127.0.0.1:8000/ui",
-        "docs": "http://127.0.0.1:8000/docs",
+        "ui": "http://127.0.0.1:8000/ui" if demo_routes_allowed() else None,
+        "docs": "http://127.0.0.1:8000/docs" if _api_docs_enabled else None,
         "simple_flow": "POST /audience/generate",
         "modules": [
             "ingestion_privacy",
@@ -56,7 +88,7 @@ def root():
 
 # Adaptive agent routes
 from app.api.agent_routes import router as agent_router
-app.include_router(agent_router)
+_include_audience_router(agent_router, demo_only=True)
 
 
 # ---------------------------------------------------------------------
@@ -65,7 +97,9 @@ app.include_router(agent_router)
 from fastapi.staticfiles import StaticFiles as _StaticFiles
 from fastapi.responses import FileResponse as _FileResponse
 
-if not any(getattr(route, "path", None) == "/static" for route in app.routes):
+if demo_routes_allowed() and not any(
+    getattr(route, "path", None) == "/static" for route in app.routes
+):
     app.mount("/static", _StaticFiles(directory="app/static"), name="static")
 
 @app.get("/ui/audience-agents")
@@ -84,10 +118,15 @@ def audience_agents_ui():
 from fastapi.responses import FileResponse as _AudienceFileResponse
 from fastapi.staticfiles import StaticFiles as _AudienceStaticFiles
 
-try:
-    app.mount("/static", _AudienceStaticFiles(directory="app/static"), name="static")
-except RuntimeError:
-    pass
+if demo_routes_allowed():
+    try:
+        app.mount(
+            "/static",
+            _AudienceStaticFiles(directory="app/static"),
+            name="static",
+        )
+    except RuntimeError:
+        pass
 
 @app.get("/ui/audience-agents")
 def audience_agents_ui():
@@ -103,11 +142,11 @@ from app.api.audience_intelligence_prompt import router as audience_intelligence
 app.include_router(audience_intelligence_prompt_router)
 
 from app.api.audience_intelligence_jobs import router as audience_intelligence_jobs_router
-app.include_router(audience_intelligence_jobs_router)
+_include_audience_router(audience_intelligence_jobs_router)
 
 
 from app.api.audience_intelligence_run_history import router as audience_intelligence_run_history_router
-app.include_router(audience_intelligence_run_history_router)
+_include_audience_router(audience_intelligence_run_history_router)
 
 from app.api.audience_intelligence_modules import router as audience_intelligence_modules_router
 from app.api.audience_intelligence_ingestion import router as audience_intelligence_ingestion_router
@@ -115,21 +154,35 @@ from app.api.audience_intelligence_synthetic import router as audience_intellige
 from app.api.audience_intelligence_module1_status import router as audience_intelligence_module1_status_router
 from app.api.audience_intelligence_module2_status import router as audience_intelligence_module2_status_router
 from app.api.audience_intelligence_module3_status import router as audience_intelligence_module3_status_router
+from app.api.audience_intelligence_module4_status import router as audience_intelligence_module4_status_router
+from app.api.audience_intelligence_module5_status import router as audience_intelligence_module5_status_router
+from app.api.audience_intelligence_quality_status import router as audience_intelligence_quality_status_router
+from app.api.audience_intelligence_observability_status import router as audience_intelligence_observability_status_router
+from app.api.audience_intelligence_security_status import router as audience_intelligence_security_status_router
+from app.api.audience_intelligence_infrastructure_status import router as audience_intelligence_infrastructure_status_router
+from app.api.audience_intelligence_fresh_data_workflows import router as audience_intelligence_fresh_data_workflows_router
 from app.api.audience_intelligence_source_health import router as audience_intelligence_source_health_router
 from app.api.audience_intelligence_provider_ingestion import router as audience_intelligence_provider_ingestion_router
 from app.api.punk_ai_audience_proposals import router as punk_ai_audience_proposals_router
-app.include_router(audience_intelligence_modules_router)
-app.include_router(audience_intelligence_ingestion_router)
-app.include_router(audience_intelligence_synthetic_router)
-app.include_router(audience_intelligence_module1_status_router)
-app.include_router(audience_intelligence_module2_status_router)
-app.include_router(audience_intelligence_module3_status_router)
-app.include_router(audience_intelligence_source_health_router)
-app.include_router(audience_intelligence_provider_ingestion_router)
-app.include_router(punk_ai_audience_proposals_router)
+_include_audience_router(audience_intelligence_modules_router)
+_include_audience_router(audience_intelligence_ingestion_router)
+_include_audience_router(audience_intelligence_synthetic_router)
+_include_audience_router(audience_intelligence_module1_status_router)
+_include_audience_router(audience_intelligence_module2_status_router)
+_include_audience_router(audience_intelligence_module3_status_router)
+_include_audience_router(audience_intelligence_module4_status_router)
+_include_audience_router(audience_intelligence_module5_status_router)
+_include_audience_router(audience_intelligence_quality_status_router)
+_include_audience_router(audience_intelligence_observability_status_router)
+_include_audience_router(audience_intelligence_security_status_router)
+_include_audience_router(audience_intelligence_infrastructure_status_router)
+_include_audience_router(audience_intelligence_fresh_data_workflows_router)
+_include_audience_router(audience_intelligence_source_health_router)
+_include_audience_router(audience_intelligence_provider_ingestion_router)
+_include_audience_router(punk_ai_audience_proposals_router)
 
 from app.api.audience_intelligence_swarm import router as audience_intelligence_swarm_router
-app.include_router(audience_intelligence_swarm_router)
+_include_audience_router(audience_intelligence_swarm_router)
 
 # Production health/readiness routes
 app.include_router(health_router)

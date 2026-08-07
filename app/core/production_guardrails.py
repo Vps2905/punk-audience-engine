@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+from fastapi import HTTPException, status
+
 
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -37,6 +39,30 @@ def demo_routes_allowed() -> bool:
         return True
 
     return _bool_env("ALLOW_DEMO_ROUTES", False)
+
+
+def require_legacy_local_routes_allowed() -> None:
+    """Hide local-file APIs completely from the production route surface."""
+
+    if local_file_storage_allowed():
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Legacy local route is disabled in production.",
+    )
+
+
+def require_demo_routes_allowed() -> None:
+    """Hide all adaptive/demo execution routes in production."""
+
+    if demo_routes_allowed():
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Demo route is disabled in production.",
+    )
 
 
 def require_local_file_storage_allowed(feature_name: str) -> None:

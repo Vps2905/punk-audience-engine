@@ -12,6 +12,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from app.services.privacy_budget_ledger_service import PrivacyBudgetLedgerService, PrivacyBudgetRequest
 from app.core.production_guardrails import local_file_storage_allowed
+from app.core.tenant_request_auth import TENANT_PATTERN
 
 
 class AudienceRunHistoryService:
@@ -30,9 +31,22 @@ class AudienceRunHistoryService:
     def persist_run(
         self,
         *,
+        tenant_id: str,
         final_summary: Dict[str, Any],
         selected_cohorts: pd.DataFrame | List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
+        summary_tenant_id = str(
+            final_summary.get("tenant_id") or ""
+        ).strip()
+        if summary_tenant_id and (
+            self._tenant_id(summary_tenant_id)
+            != normalized_tenant_id
+        ):
+            raise ValueError(
+                "Run summary tenant ownership does not match the request."
+            )
+
         db_url = self._db_url()
         if not db_url:
             return {"enabled": False, "status": "skipped", "reason": "no_database_url"}
@@ -42,6 +56,7 @@ class AudienceRunHistoryService:
             return {"enabled": False, "status": "skipped", "reason": "missing_run_id"}
 
         clean_summary = self._clean_json(final_summary)
+        clean_summary["tenant_id"] = normalized_tenant_id
         cohort_rows = self._build_cohort_rows(
             run_id=run_id,
             final_summary=clean_summary,
@@ -53,13 +68,37 @@ class AudienceRunHistoryService:
         try:
             engine = create_engine(self._connection_url(db_url))
             with engine.begin() as conn:
-                self._ensure_tables(conn)
-                self._upsert_run(conn, clean_summary)
-                self._replace_cohorts(conn, run_id, cohort_rows)
-                self._replace_artifacts(conn, run_id, artifact_rows)
-                self._replace_warnings(conn, run_id, warning_rows)
+                self._set_tenant_context(
+                    conn,
+                    normalized_tenant_id,
+                )
+                self._ensure_tables(conn, normalized_tenant_id)
+                self._upsert_run(
+                    conn,
+                    normalized_tenant_id,
+                    clean_summary,
+                )
+                self._replace_cohorts(
+                    conn,
+                    normalized_tenant_id,
+                    run_id,
+                    cohort_rows,
+                )
+                self._replace_artifacts(
+                    conn,
+                    normalized_tenant_id,
+                    run_id,
+                    artifact_rows,
+                )
+                self._replace_warnings(
+                    conn,
+                    normalized_tenant_id,
+                    run_id,
+                    warning_rows,
+                )
                 self._record_event_conn(
                     conn,
+                    tenant_id=normalized_tenant_id,
                     run_id=run_id,
                     event_type="run_persisted",
                     actor="system",
@@ -101,11 +140,13 @@ class AudienceRunHistoryService:
     def list_runs(
         self,
         *,
+        tenant_id: str,
         limit: int = 50,
         offset: int = 0,
         approval_status: Optional[str] = None,
         status: Optional[str] = None,
     ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         db_url = self._db_url()
         if not db_url:
             return {"enabled": False, "status": "skipped", "reason": "no_database_url", "runs": []}
@@ -113,8 +154,12 @@ class AudienceRunHistoryService:
         limit = max(1, min(int(limit), 200))
         offset = max(0, int(offset))
 
-        where = []
-        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        where = ["tenant_id = :tenant_id"]
+        params: Dict[str, Any] = {
+            "tenant_id": normalized_tenant_id,
+            "limit": limit,
+            "offset": offset,
+        }
 
         if approval_status:
             where.append("approval_status = :approval_status")
@@ -127,7 +172,8 @@ class AudienceRunHistoryService:
 
         engine = create_engine(self._connection_url(db_url))
         with engine.begin() as conn:
-            self._ensure_tables(conn)
+            self._set_tenant_context(conn, normalized_tenant_id)
+            self._ensure_tables(conn, normalized_tenant_id)
             rows = conn.execute(
                 text(
                     f"""
@@ -149,7 +195,7 @@ class AudienceRunHistoryService:
                         run_dir,
                         created_at,
                         updated_at
-                    FROM audience_run_history
+                    FROM public.audience_run_history
                     {where_sql}
                     ORDER BY created_at DESC
                     LIMIT :limit OFFSET :offset
@@ -166,18 +212,32 @@ class AudienceRunHistoryService:
             "runs": [self._row_to_dict(row) for row in rows],
         }
 
-    def get_run(self, run_id: str) -> Dict[str, Any]:
+    def get_run(
+        self,
+        run_id: str,
+        *,
+        tenant_id: str,
+    ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         db_url = self._db_url()
         if not db_url:
             return {"enabled": False, "status": "skipped", "reason": "no_database_url"}
 
         engine = create_engine(self._connection_url(db_url))
         with engine.begin() as conn:
-            self._ensure_tables(conn)
+            self._set_tenant_context(conn, normalized_tenant_id)
+            self._ensure_tables(conn, normalized_tenant_id)
 
             row = conn.execute(
-                text("SELECT * FROM audience_run_history WHERE run_id = :run_id"),
-                {"run_id": run_id},
+                text(
+                    "SELECT * FROM public.audience_run_history "
+                    "WHERE tenant_id = :tenant_id "
+                    "AND run_id = :run_id"
+                ),
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
             ).fetchone()
 
             if not row:
@@ -202,36 +262,48 @@ class AudienceRunHistoryService:
                         risk_level,
                         metadata,
                         created_at
-                    FROM audience_run_cohorts
-                    WHERE run_id = :run_id
+                    FROM public.audience_run_cohorts
+                    WHERE tenant_id = :tenant_id
+                      AND run_id = :run_id
                     ORDER BY quality_score DESC NULLS LAST, created_at ASC
                     """
                 ),
-                {"run_id": run_id},
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
             ).fetchall()
 
             artifacts = conn.execute(
                 text(
                     """
                     SELECT artifact_type, artifact_path, metadata, created_at
-                    FROM audience_run_artifacts
-                    WHERE run_id = :run_id
+                    FROM public.audience_run_artifacts
+                    WHERE tenant_id = :tenant_id
+                      AND run_id = :run_id
                     ORDER BY created_at ASC
                     """
                 ),
-                {"run_id": run_id},
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
             ).fetchall()
 
             warnings = conn.execute(
                 text(
                     """
                     SELECT warning_type, warning_message, metadata, created_at
-                    FROM audience_run_warnings
-                    WHERE run_id = :run_id
+                    FROM public.audience_run_warnings
+                    WHERE tenant_id = :tenant_id
+                      AND run_id = :run_id
                     ORDER BY created_at ASC
                     """
                 ),
-                {"run_id": run_id},
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
             ).fetchall()
 
         return {
@@ -246,6 +318,7 @@ class AudienceRunHistoryService:
     def list_cohorts(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         location: Optional[str] = None,
         poi_type: Optional[str] = None,
@@ -255,6 +328,7 @@ class AudienceRunHistoryService:
         limit: int = 100,
         offset: int = 0,
     ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         db_url = self._db_url()
 
         if not db_url:
@@ -273,6 +347,7 @@ class AudienceRunHistoryService:
         )
 
         where = [
+            "tenant_id = :tenant_id",
             "run_id = :run_id",
             (
                 "COALESCE("
@@ -283,6 +358,7 @@ class AudienceRunHistoryService:
         ]
 
         params: Dict[str, Any] = {
+            "tenant_id": normalized_tenant_id,
             "run_id": run_id,
             "min_quality": min_quality,
             "limit": limit,
@@ -325,17 +401,22 @@ class AudienceRunHistoryService:
         )
 
         with engine.begin() as conn:
-            self._ensure_tables(conn)
+            self._set_tenant_context(conn, normalized_tenant_id)
+            self._ensure_tables(conn, normalized_tenant_id)
 
             run_exists = conn.execute(
                 text(
                     """
                     SELECT 1
-                    FROM audience_run_history
-                    WHERE run_id = :run_id
+                    FROM public.audience_run_history
+                    WHERE tenant_id = :tenant_id
+                      AND run_id = :run_id
                     """
                 ),
-                {"run_id": run_id},
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
             ).scalar()
 
             if not run_exists:
@@ -351,7 +432,7 @@ class AudienceRunHistoryService:
                     text(
                         f"""
                         SELECT COUNT(*)
-                        FROM audience_run_cohorts
+                        FROM public.audience_run_cohorts
                         WHERE {where_sql}
                         """
                     ),
@@ -378,7 +459,7 @@ class AudienceRunHistoryService:
                         risk_level,
                         metadata,
                         created_at
-                    FROM audience_run_cohorts
+                    FROM public.audience_run_cohorts
                     WHERE {where_sql}
                     ORDER BY
                         COALESCE(
@@ -417,25 +498,56 @@ class AudienceRunHistoryService:
             ],
         }
 
-    def get_audit(self, run_id: str) -> Dict[str, Any]:
+    def get_audit(
+        self,
+        run_id: str,
+        *,
+        tenant_id: str,
+    ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         db_url = self._db_url()
         if not db_url:
             return {"enabled": False, "status": "skipped", "reason": "no_database_url"}
 
         engine = create_engine(self._connection_url(db_url))
         with engine.begin() as conn:
-            self._ensure_tables(conn)
+            self._set_tenant_context(conn, normalized_tenant_id)
+            self._ensure_tables(conn, normalized_tenant_id)
+
+            run_exists = conn.execute(
+                text(
+                    "SELECT 1 FROM public.audience_run_history "
+                    "WHERE tenant_id = :tenant_id "
+                    "AND run_id = :run_id"
+                ),
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
+            ).scalar()
+            if not run_exists:
+                return {
+                    "enabled": True,
+                    "status": "not_found",
+                    "run_id": run_id,
+                    "events": [],
+                    "approvals": [],
+                }
 
             events = conn.execute(
                 text(
                     """
                     SELECT event_type, actor, details, created_at
-                    FROM audience_run_events
-                    WHERE run_id = :run_id
+                    FROM public.audience_run_events
+                    WHERE tenant_id = :tenant_id
+                      AND run_id = :run_id
                     ORDER BY created_at ASC, id ASC
                     """
                 ),
-                {"run_id": run_id},
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
             ).fetchall()
 
             approvals = conn.execute(
@@ -444,12 +556,16 @@ class AudienceRunHistoryService:
                     SELECT action, actor, note, previous_status, new_status,
                            downstream_export_enabled, privacy_snapshot,
                            artifacts_snapshot, created_at
-                    FROM audience_run_approvals
-                    WHERE run_id = :run_id
+                    FROM public.audience_run_approvals
+                    WHERE tenant_id = :tenant_id
+                      AND run_id = :run_id
                     ORDER BY created_at ASC, id ASC
                     """
                 ),
-                {"run_id": run_id},
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
             ).fetchall()
 
         return {
@@ -609,12 +725,14 @@ class AudienceRunHistoryService:
     def approve_run(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         actor: str = "internal_reviewer",
         note: Optional[str] = None,
         downstream_export_enabled: bool = True,
     ) -> Dict[str, Any]:
         return self._decision(
+            tenant_id=tenant_id,
             run_id=run_id,
             action="approved",
             actor=actor,
@@ -625,11 +743,13 @@ class AudienceRunHistoryService:
     def reject_run(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         actor: str = "internal_reviewer",
         note: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self._decision(
+            tenant_id=tenant_id,
             run_id=run_id,
             action="rejected",
             actor=actor,
@@ -640,20 +760,41 @@ class AudienceRunHistoryService:
     def record_event(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         event_type: str,
         actor: str = "system",
         details: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         db_url = self._db_url()
         if not db_url:
             return {"enabled": False, "status": "skipped", "reason": "no_database_url"}
 
         engine = create_engine(self._connection_url(db_url))
         with engine.begin() as conn:
-            self._ensure_tables(conn)
+            self._set_tenant_context(conn, normalized_tenant_id)
+            self._ensure_tables(conn, normalized_tenant_id)
+            run_exists = conn.execute(
+                text(
+                    "SELECT 1 FROM public.audience_run_history "
+                    "WHERE tenant_id = :tenant_id "
+                    "AND run_id = :run_id"
+                ),
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
+            ).scalar()
+            if not run_exists:
+                return {
+                    "enabled": True,
+                    "status": "not_found",
+                    "run_id": run_id,
+                }
             self._record_event_conn(
                 conn,
+                tenant_id=normalized_tenant_id,
                 run_id=run_id,
                 event_type=event_type,
                 actor=actor,
@@ -665,12 +806,14 @@ class AudienceRunHistoryService:
     def _decision(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         action: str,
         actor: str,
         note: Optional[str],
         downstream_export_enabled: bool,
     ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         db_url = self._db_url()
         if not db_url:
             return {"enabled": False, "status": "skipped", "reason": "no_database_url"}
@@ -681,11 +824,19 @@ class AudienceRunHistoryService:
         engine = create_engine(self._connection_url(db_url))
 
         with engine.begin() as conn:
-            self._ensure_tables(conn)
+            self._set_tenant_context(conn, normalized_tenant_id)
+            self._ensure_tables(conn, normalized_tenant_id)
 
             row = conn.execute(
-                text("SELECT * FROM audience_run_history WHERE run_id = :run_id FOR UPDATE"),
-                {"run_id": run_id},
+                text(
+                    "SELECT * FROM public.audience_run_history "
+                    "WHERE tenant_id = :tenant_id "
+                    "AND run_id = :run_id FOR UPDATE"
+                ),
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                },
             ).fetchone()
 
             if not row:
@@ -695,7 +846,12 @@ class AudienceRunHistoryService:
             previous_status = run.get("approval_status")
             exported_cohorts = max(
                 self._safe_int(run.get("exported_cohorts")) or 0,
-                self._exportable_cohort_count_conn(conn, run_id) or 0,
+                self._exportable_cohort_count_conn(
+                    conn,
+                    normalized_tenant_id,
+                    run_id,
+                )
+                or 0,
             )
 
             if action == "approved":
@@ -706,6 +862,7 @@ class AudienceRunHistoryService:
 
                     self._record_event_conn(
                         conn,
+                        tenant_id=normalized_tenant_id,
                         run_id=run_id,
                         event_type="approval_blocked",
                         actor=actor,
@@ -721,14 +878,16 @@ class AudienceRunHistoryService:
                     conn.execute(
                         text(
                             """
-                            UPDATE audience_run_history
+                            UPDATE public.audience_run_history
                             SET approval_status = :approval_status,
                                 downstream_export_enabled = false,
                                 updated_at = now()
-                            WHERE run_id = :run_id
+                            WHERE tenant_id = :tenant_id
+                              AND run_id = :run_id
                             """
                         ),
                         {
+                            "tenant_id": normalized_tenant_id,
                             "run_id": run_id,
                             "approval_status": blocked_status,
                         },
@@ -737,12 +896,14 @@ class AudienceRunHistoryService:
                     conn.execute(
                         text(
                             """
-                            UPDATE audience_run_cohorts
+                            UPDATE public.audience_run_cohorts
                             SET approval_status = :approval_status
-                            WHERE run_id = :run_id
+                            WHERE tenant_id = :tenant_id
+                              AND run_id = :run_id
                             """
                         ),
                         {
+                            "tenant_id": normalized_tenant_id,
                             "run_id": run_id,
                             "approval_status": blocked_status,
                         },
@@ -765,6 +926,7 @@ class AudienceRunHistoryService:
                     if previous_status and str(previous_status).startswith("blocked"):
                         self._record_event_conn(
                             conn,
+                            tenant_id=normalized_tenant_id,
                             run_id=run_id,
                             event_type="approval_blocked",
                             actor=actor,
@@ -785,6 +947,7 @@ class AudienceRunHistoryService:
                     if exported_cohorts <= 0:
                         self._record_event_conn(
                             conn,
+                            tenant_id=normalized_tenant_id,
                             run_id=run_id,
                             event_type="approval_blocked",
                             actor=actor,
@@ -806,6 +969,7 @@ class AudienceRunHistoryService:
                     database_url=db_url
                 ).check_and_record(
                     self._privacy_budget_request_for_run(
+                        tenant_id=normalized_tenant_id,
                         run_id=run_id,
                         run=run,
                         actor=actor,
@@ -818,6 +982,7 @@ class AudienceRunHistoryService:
 
                     self._record_event_conn(
                         conn,
+                        tenant_id=normalized_tenant_id,
                         run_id=run_id,
                         event_type="privacy_budget_blocked",
                         actor=actor,
@@ -833,14 +998,16 @@ class AudienceRunHistoryService:
                     conn.execute(
                         text(
                             """
-                            UPDATE audience_run_history
+                            UPDATE public.audience_run_history
                             SET approval_status = :approval_status,
                                 downstream_export_enabled = false,
                                 updated_at = now()
-                            WHERE run_id = :run_id
+                            WHERE tenant_id = :tenant_id
+                              AND run_id = :run_id
                             """
                         ),
                         {
+                            "tenant_id": normalized_tenant_id,
                             "run_id": run_id,
                             "approval_status": blocked_status,
                         },
@@ -849,12 +1016,14 @@ class AudienceRunHistoryService:
                     conn.execute(
                         text(
                             """
-                            UPDATE audience_run_cohorts
+                            UPDATE public.audience_run_cohorts
                             SET approval_status = :approval_status
-                            WHERE run_id = :run_id
+                            WHERE tenant_id = :tenant_id
+                              AND run_id = :run_id
                             """
                         ),
                         {
+                            "tenant_id": normalized_tenant_id,
                             "run_id": run_id,
                             "approval_status": blocked_status,
                         },
@@ -876,6 +1045,7 @@ class AudienceRunHistoryService:
 
                 self._record_event_conn(
                     conn,
+                    tenant_id=normalized_tenant_id,
                     run_id=run_id,
                     event_type="privacy_budget_spent",
                     actor=actor,
@@ -889,6 +1059,7 @@ class AudienceRunHistoryService:
                 if previous_status and str(previous_status).startswith("blocked"):
                     self._record_event_conn(
                         conn,
+                        tenant_id=normalized_tenant_id,
                         run_id=run_id,
                         event_type="approval_blocked",
                         actor=actor,
@@ -909,6 +1080,7 @@ class AudienceRunHistoryService:
                 if exported_cohorts <= 0:
                     self._record_event_conn(
                         conn,
+                        tenant_id=normalized_tenant_id,
                         run_id=run_id,
                         event_type="approval_blocked",
                         actor=actor,
@@ -947,16 +1119,18 @@ class AudienceRunHistoryService:
             conn.execute(
                 text(
                     """
-                    UPDATE audience_run_history
+                    UPDATE public.audience_run_history
                     SET approval_status = :approval_status,
                         downstream_export_enabled = :downstream_export_enabled,
                         safe_export = CAST(:safe_export AS jsonb),
                         final_summary = CAST(:final_summary AS jsonb),
                         updated_at = now()
-                    WHERE run_id = :run_id
+                    WHERE tenant_id = :tenant_id
+                      AND run_id = :run_id
                     """
                 ),
                 {
+                    "tenant_id": normalized_tenant_id,
                     "run_id": run_id,
                     "approval_status": new_status,
                     "downstream_export_enabled": new_downstream,
@@ -968,18 +1142,24 @@ class AudienceRunHistoryService:
             conn.execute(
                 text(
                     """
-                    UPDATE audience_run_cohorts
+                    UPDATE public.audience_run_cohorts
                     SET approval_status = :approval_status
-                    WHERE run_id = :run_id
+                    WHERE tenant_id = :tenant_id
+                      AND run_id = :run_id
                     """
                 ),
-                {"run_id": run_id, "approval_status": new_status},
+                {
+                    "tenant_id": normalized_tenant_id,
+                    "run_id": run_id,
+                    "approval_status": new_status,
+                },
             )
 
             conn.execute(
                 text(
                     """
-                    INSERT INTO audience_run_approvals (
+                    INSERT INTO public.audience_run_approvals (
+                        tenant_id,
                         run_id,
                         action,
                         actor,
@@ -991,6 +1171,7 @@ class AudienceRunHistoryService:
                         artifacts_snapshot
                     )
                     VALUES (
+                        :tenant_id,
                         :run_id,
                         :action,
                         :actor,
@@ -1004,6 +1185,7 @@ class AudienceRunHistoryService:
                     """
                 ),
                 {
+                    "tenant_id": normalized_tenant_id,
                     "run_id": run_id,
                     "action": action,
                     "actor": actor,
@@ -1018,6 +1200,7 @@ class AudienceRunHistoryService:
 
             self._record_event_conn(
                 conn,
+                tenant_id=normalized_tenant_id,
                 run_id=run_id,
                 event_type=f"run_{action}",
                 actor=actor,
@@ -1042,7 +1225,12 @@ class AudienceRunHistoryService:
         }
 
 
-    def _exportable_cohort_count_conn(self, conn, run_id: str) -> int:
+    def _exportable_cohort_count_conn(
+        self,
+        conn,
+        tenant_id: str,
+        run_id: str,
+    ) -> int:
         """
         Count persisted cohorts for approval eligibility.
 
@@ -1055,11 +1243,15 @@ class AudienceRunHistoryService:
             text(
                 """
                 SELECT COUNT(*)
-                FROM audience_run_cohorts
-                WHERE run_id = :run_id
+                FROM public.audience_run_cohorts
+                WHERE tenant_id = :tenant_id
+                  AND run_id = :run_id
                 """
             ),
-            {"run_id": run_id},
+            {
+                "tenant_id": self._tenant_id(tenant_id),
+                "run_id": run_id,
+            },
         ).scalar()
 
         return int(value or 0)
@@ -1067,6 +1259,7 @@ class AudienceRunHistoryService:
     def _privacy_budget_request_for_run(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         run: Dict[str, Any],
         actor: str,
@@ -1111,6 +1304,7 @@ class AudienceRunHistoryService:
         max_budget = float(privacy_budget.get("max_budget", safe_export.get("max_budget", 5.0)))
 
         return PrivacyBudgetRequest(
+            tenant_id=self._tenant_id(tenant_id),
             run_id=run_id,
             cohort_id=None,
             budget_scope=budget_scope,
@@ -1141,13 +1335,33 @@ class AudienceRunHistoryService:
             return "postgresql://" + db_url[len("postgres://") :]
         return db_url
 
-    def _ensure_tables(self, conn) -> None:
+    def _tenant_id(self, tenant_id: str) -> str:
+        normalized = str(tenant_id or "").strip().lower()
+        if not TENANT_PATTERN.fullmatch(normalized):
+            raise ValueError("Invalid tenant identifier.")
+        return normalized
+
+    def _set_tenant_context(self, conn, tenant_id: str) -> None:
+        conn.execute(
+            text(
+                "SELECT set_config("
+                "'app.tenant_id', :tenant_id, true"
+                ")"
+            ),
+            {"tenant_id": self._tenant_id(tenant_id)},
+        )
+
+    def _ensure_tables(self, conn, tenant_id: str) -> None:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         conn.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS audience_run_history (
+                CREATE TABLE IF NOT EXISTS public.audience_run_history (
                     id BIGSERIAL PRIMARY KEY,
-                    run_id TEXT UNIQUE NOT NULL,
+                    tenant_id TEXT NOT NULL CHECK (
+                        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+                    ),
+                    run_id TEXT NOT NULL,
                     prompt TEXT,
                     status TEXT,
                     source_mode TEXT,
@@ -1174,35 +1388,39 @@ class AudienceRunHistoryService:
                     final_summary_path TEXT,
                     business_summary_path TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (tenant_id, run_id)
                 );
                 """
             )
         )
 
         for ddl in [
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS filter_mode TEXT;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS locations_detected JSONB NOT NULL DEFAULT '[]'::jsonb;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS poi_terms_detected JSONB NOT NULL DEFAULT '[]'::jsonb;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS dayparts_detected JSONB NOT NULL DEFAULT '[]'::jsonb;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS privacy_guarantees JSONB NOT NULL DEFAULT '{}'::jsonb;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS v2_autonomous JSONB NOT NULL DEFAULT '{}'::jsonb;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS v2_swarm_review JSONB NOT NULL DEFAULT '{}'::jsonb;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS run_dir TEXT;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS final_summary_path TEXT;",
-            "ALTER TABLE audience_run_history ADD COLUMN IF NOT EXISTS business_summary_path TEXT;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS filter_mode TEXT;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS locations_detected JSONB NOT NULL DEFAULT '[]'::jsonb;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS poi_terms_detected JSONB NOT NULL DEFAULT '[]'::jsonb;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS dayparts_detected JSONB NOT NULL DEFAULT '[]'::jsonb;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS privacy_guarantees JSONB NOT NULL DEFAULT '{}'::jsonb;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS v2_autonomous JSONB NOT NULL DEFAULT '{}'::jsonb;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS v2_swarm_review JSONB NOT NULL DEFAULT '{}'::jsonb;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS run_dir TEXT;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS final_summary_path TEXT;",
+            "ALTER TABLE public.audience_run_history ADD COLUMN IF NOT EXISTS business_summary_path TEXT;",
         ]:
             conn.execute(text(ddl))
 
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_history_run_id ON audience_run_history(run_id);"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_history_created_at ON audience_run_history(created_at DESC);"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_history_approval ON audience_run_history(approval_status);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_history_tenant_run ON public.audience_run_history(tenant_id, run_id);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_history_tenant_created ON public.audience_run_history(tenant_id, created_at DESC);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_history_tenant_approval ON public.audience_run_history(tenant_id, approval_status);"))
 
         conn.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS audience_run_cohorts (
+                CREATE TABLE IF NOT EXISTS public.audience_run_cohorts (
                     id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL CHECK (
+                        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+                    ),
                     run_id TEXT NOT NULL,
                     export_cohort_id TEXT NOT NULL,
                     audience_name TEXT,
@@ -1219,22 +1437,24 @@ class AudienceRunHistoryService:
                     risk_level TEXT,
                     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    UNIQUE (run_id, export_cohort_id)
+                    UNIQUE (tenant_id, run_id, export_cohort_id),
+                    FOREIGN KEY (tenant_id, run_id)
+                    REFERENCES public.audience_run_history(tenant_id, run_id)
                 );
                 """
             )
         )
         for ddl in [
-            "ALTER TABLE audience_run_cohorts "
+            "ALTER TABLE public.audience_run_cohorts "
             "ADD COLUMN IF NOT EXISTS export_cohort_id TEXT;",
-            "ALTER TABLE audience_run_cohorts "
+            "ALTER TABLE public.audience_run_cohorts "
             "ADD COLUMN IF NOT EXISTS lookback_bucket TEXT;",
-            "ALTER TABLE audience_run_cohorts "
+            "ALTER TABLE public.audience_run_cohorts "
             "ADD COLUMN IF NOT EXISTS "
             "management_quality_score DOUBLE PRECISION;",
-            "ALTER TABLE audience_run_cohorts "
+            "ALTER TABLE public.audience_run_cohorts "
             "ADD COLUMN IF NOT EXISTS privacy_mode TEXT;",
-            "ALTER TABLE audience_run_cohorts "
+            "ALTER TABLE public.audience_run_cohorts "
             "ADD COLUMN IF NOT EXISTS data_safety_status TEXT;",
         ]:
             conn.execute(text(ddl))
@@ -1242,29 +1462,29 @@ class AudienceRunHistoryService:
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS "
-                "idx_audience_run_cohorts_run_id "
-                "ON audience_run_cohorts(run_id);"
+                "idx_audience_run_cohorts_tenant_run "
+                "ON public.audience_run_cohorts(tenant_id, run_id);"
             )
         )
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS "
-                "idx_audience_run_cohorts_export_id "
-                "ON audience_run_cohorts(export_cohort_id);"
+                "idx_audience_run_cohorts_tenant_export "
+                "ON public.audience_run_cohorts(tenant_id, export_cohort_id);"
             )
         )
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS "
-                "idx_audience_run_cohorts_location "
-                "ON audience_run_cohorts(location_name);"
+                "idx_audience_run_cohorts_tenant_location "
+                "ON public.audience_run_cohorts(tenant_id, location_name);"
             )
         )
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS "
-                "idx_audience_run_cohorts_poi "
-                "ON audience_run_cohorts(primary_poi_type);"
+                "idx_audience_run_cohorts_tenant_poi "
+                "ON public.audience_run_cohorts(tenant_id, primary_poi_type);"
             )
         )
 
@@ -1273,15 +1493,19 @@ class AudienceRunHistoryService:
         conn.execute(
             text(
                 """
-                UPDATE audience_run_cohorts
+                UPDATE public.audience_run_cohorts
                 SET export_cohort_id =
                     'legacy_' || md5(
                         run_id || ':' || id::text
                     )
-                WHERE export_cohort_id IS NULL
-                   OR BTRIM(export_cohort_id) = ''
+                WHERE tenant_id = :tenant_id
+                  AND (
+                      export_cohort_id IS NULL
+                      OR BTRIM(export_cohort_id) = ''
+                  )
                 """
-            )
+            ),
+            {"tenant_id": normalized_tenant_id},
         )
 
         # Keep the newest row if an older database already
@@ -1289,20 +1513,24 @@ class AudienceRunHistoryService:
         conn.execute(
             text(
                 """
-                DELETE FROM audience_run_cohorts older
-                USING audience_run_cohorts newer
-                WHERE older.run_id = newer.run_id
+                DELETE FROM public.audience_run_cohorts older
+                USING public.audience_run_cohorts newer
+                WHERE older.tenant_id = :tenant_id
+                  AND newer.tenant_id = :tenant_id
+                  AND older.tenant_id = newer.tenant_id
+                  AND older.run_id = newer.run_id
                   AND older.export_cohort_id =
                       newer.export_cohort_id
                   AND older.id < newer.id
                 """
-            )
+            ),
+            {"tenant_id": normalized_tenant_id},
         )
 
         conn.execute(
             text(
                 """
-                ALTER TABLE audience_run_cohorts
+                ALTER TABLE public.audience_run_cohorts
                 ALTER COLUMN export_cohort_id
                 SET NOT NULL
                 """
@@ -1313,8 +1541,9 @@ class AudienceRunHistoryService:
             text(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS
-                uq_audience_run_cohorts_run_export
-                ON audience_run_cohorts(
+                uq_audience_run_cohorts_tenant_run_export
+                ON public.audience_run_cohorts(
+                    tenant_id,
                     run_id,
                     export_cohort_id
                 )
@@ -1326,8 +1555,9 @@ class AudienceRunHistoryService:
             text(
                 """
                 CREATE INDEX IF NOT EXISTS
-                idx_audience_run_cohorts_filter
-                ON audience_run_cohorts(
+                idx_audience_run_cohorts_tenant_filter
+                ON public.audience_run_cohorts(
+                    tenant_id,
                     run_id,
                     approval_status,
                     created_day_part,
@@ -1341,56 +1571,74 @@ class AudienceRunHistoryService:
         conn.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS audience_run_artifacts (
+                CREATE TABLE IF NOT EXISTS public.audience_run_artifacts (
                     id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL CHECK (
+                        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+                    ),
                     run_id TEXT NOT NULL,
                     artifact_type TEXT,
                     artifact_path TEXT,
                     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    FOREIGN KEY (tenant_id, run_id)
+                    REFERENCES public.audience_run_history(tenant_id, run_id)
                 );
                 """
             )
         )
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_artifacts_run_id ON audience_run_artifacts(run_id);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_artifacts_tenant_run ON public.audience_run_artifacts(tenant_id, run_id);"))
 
         conn.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS audience_run_warnings (
+                CREATE TABLE IF NOT EXISTS public.audience_run_warnings (
                     id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL CHECK (
+                        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+                    ),
                     run_id TEXT NOT NULL,
                     warning_type TEXT,
                     warning_message TEXT NOT NULL,
                     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    FOREIGN KEY (tenant_id, run_id)
+                    REFERENCES public.audience_run_history(tenant_id, run_id)
                 );
                 """
             )
         )
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_warnings_run_id ON audience_run_warnings(run_id);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_warnings_tenant_run ON public.audience_run_warnings(tenant_id, run_id);"))
 
         conn.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS audience_run_events (
+                CREATE TABLE IF NOT EXISTS public.audience_run_events (
                     id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL CHECK (
+                        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+                    ),
                     run_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     actor TEXT NOT NULL DEFAULT 'system',
                     details JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    FOREIGN KEY (tenant_id, run_id)
+                    REFERENCES public.audience_run_history(tenant_id, run_id)
                 );
                 """
             )
         )
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_events_run_id ON audience_run_events(run_id);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_events_tenant_run ON public.audience_run_events(tenant_id, run_id);"))
 
         conn.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS audience_run_approvals (
+                CREATE TABLE IF NOT EXISTS public.audience_run_approvals (
                     id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL CHECK (
+                        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+                    ),
                     run_id TEXT NOT NULL,
                     action TEXT NOT NULL,
                     actor TEXT NOT NULL,
@@ -1400,14 +1648,66 @@ class AudienceRunHistoryService:
                     downstream_export_enabled BOOLEAN NOT NULL DEFAULT false,
                     privacy_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
                     artifacts_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    FOREIGN KEY (tenant_id, run_id)
+                    REFERENCES public.audience_run_history(tenant_id, run_id)
                 );
                 """
             )
         )
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_approvals_run_id ON audience_run_approvals(run_id);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audience_run_approvals_tenant_run ON public.audience_run_approvals(tenant_id, run_id);"))
 
-    def _upsert_run(self, conn, final_summary: Dict[str, Any]) -> None:
+        for table_name in (
+            "audience_run_history",
+            "audience_run_cohorts",
+            "audience_run_artifacts",
+            "audience_run_warnings",
+            "audience_run_events",
+            "audience_run_approvals",
+        ):
+            policy_name = f"{table_name}_tenant_policy"
+            conn.execute(
+                text(
+                    f"ALTER TABLE public.{table_name} "
+                    "ENABLE ROW LEVEL SECURITY"
+                )
+            )
+            conn.execute(
+                text(
+                    f"ALTER TABLE public.{table_name} "
+                    "FORCE ROW LEVEL SECURITY"
+                )
+            )
+            conn.execute(
+                text(
+                    f"DROP POLICY IF EXISTS {policy_name} "
+                    f"ON public.{table_name}"
+                )
+            )
+            conn.execute(
+                text(
+                    f"CREATE POLICY {policy_name} "
+                    f"ON public.{table_name} "
+                    "USING (tenant_id = current_setting("
+                    "'app.tenant_id', true)) "
+                    "WITH CHECK (tenant_id = current_setting("
+                    "'app.tenant_id', true))"
+                )
+            )
+            conn.execute(
+                text(
+                    f"REVOKE ALL ON public.{table_name} "
+                    "FROM PUBLIC"
+                )
+            )
+
+    def _upsert_run(
+        self,
+        conn,
+        tenant_id: str,
+        final_summary: Dict[str, Any],
+    ) -> None:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         safe_export = final_summary.get("safe_export") or {}
         prompt_filter_report = final_summary.get("prompt_filter_report") or {}
         hybrid = prompt_filter_report.get("hybrid_retrieval_intelligence") or {}
@@ -1420,7 +1720,8 @@ class AudienceRunHistoryService:
         conn.execute(
             text(
                 """
-                INSERT INTO audience_run_history (
+                INSERT INTO public.audience_run_history (
+                    tenant_id,
                     run_id,
                     prompt,
                     status,
@@ -1450,6 +1751,7 @@ class AudienceRunHistoryService:
                     updated_at
                 )
                 VALUES (
+                    :tenant_id,
                     :run_id,
                     :prompt,
                     :status,
@@ -1478,7 +1780,7 @@ class AudienceRunHistoryService:
                     :business_summary_path,
                     now()
                 )
-                ON CONFLICT (run_id)
+                ON CONFLICT (tenant_id, run_id)
                 DO UPDATE SET
                     prompt = EXCLUDED.prompt,
                     status = EXCLUDED.status,
@@ -1509,6 +1811,7 @@ class AudienceRunHistoryService:
                 """
             ),
             {
+                "tenant_id": normalized_tenant_id,
                 "run_id": final_summary.get("run_id"),
                 "prompt": final_summary.get("prompt"),
                 "status": final_summary.get("status"),
@@ -1546,30 +1849,40 @@ class AudienceRunHistoryService:
     def _replace_cohorts(
         self,
         conn,
+        tenant_id: str,
         run_id: str,
         rows: List[Dict[str, Any]],
     ) -> None:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         # Serialize concurrent persistence attempts for
         # the same run.
         conn.execute(
             text(
                 """
                 SELECT pg_advisory_xact_lock(
-                    hashtext(:run_id)
+                    hashtext(:tenant_run_key)
                 )
                 """
             ),
-            {"run_id": run_id},
+            {
+                "tenant_run_key": (
+                    f"{normalized_tenant_id}:{run_id}"
+                )
+            },
         )
 
         conn.execute(
             text(
                 """
-                DELETE FROM audience_run_cohorts
-                WHERE run_id = :run_id
+                DELETE FROM public.audience_run_cohorts
+                WHERE tenant_id = :tenant_id
+                  AND run_id = :run_id
                 """
             ),
-            {"run_id": run_id},
+            {
+                "tenant_id": normalized_tenant_id,
+                "run_id": run_id,
+            },
         )
 
         for row in rows:
@@ -1622,6 +1935,7 @@ class AudienceRunHistoryService:
                 ] = normalized_source
 
             params = {
+                "tenant_id": normalized_tenant_id,
                 "run_id": run_id,
                 "export_cohort_id": export_cohort_id,
                 "audience_name": row.get(
@@ -1668,7 +1982,8 @@ class AudienceRunHistoryService:
             conn.execute(
                 text(
                     """
-                    INSERT INTO audience_run_cohorts (
+                    INSERT INTO public.audience_run_cohorts (
+                        tenant_id,
                         run_id,
                         export_cohort_id,
                         audience_name,
@@ -1686,6 +2001,7 @@ class AudienceRunHistoryService:
                         metadata
                     )
                     VALUES (
+                        :tenant_id,
                         :run_id,
                         :export_cohort_id,
                         :audience_name,
@@ -1703,6 +2019,7 @@ class AudienceRunHistoryService:
                         CAST(:metadata AS jsonb)
                     )
                     ON CONFLICT (
+                        tenant_id,
                         run_id,
                         export_cohort_id
                     )
@@ -1729,20 +2046,38 @@ class AudienceRunHistoryService:
                 params,
             )
 
-    def _replace_artifacts(self, conn, run_id: str, rows: List[Dict[str, Any]]) -> None:
-        conn.execute(text("DELETE FROM audience_run_artifacts WHERE run_id = :run_id"), {"run_id": run_id})
+    def _replace_artifacts(
+        self,
+        conn,
+        tenant_id: str,
+        run_id: str,
+        rows: List[Dict[str, Any]],
+    ) -> None:
+        normalized_tenant_id = self._tenant_id(tenant_id)
+        conn.execute(
+            text(
+                "DELETE FROM public.audience_run_artifacts "
+                "WHERE tenant_id = :tenant_id AND run_id = :run_id"
+            ),
+            {
+                "tenant_id": normalized_tenant_id,
+                "run_id": run_id,
+            },
+        )
 
         for row in rows:
             conn.execute(
                 text(
                     """
-                    INSERT INTO audience_run_artifacts (
+                    INSERT INTO public.audience_run_artifacts (
+                        tenant_id,
                         run_id,
                         artifact_type,
                         artifact_path,
                         metadata
                     )
                     VALUES (
+                        :tenant_id,
                         :run_id,
                         :artifact_type,
                         :artifact_path,
@@ -1751,6 +2086,7 @@ class AudienceRunHistoryService:
                     """
                 ),
                 {
+                    "tenant_id": normalized_tenant_id,
                     "run_id": run_id,
                     "artifact_type": row.get("artifact_type"),
                     "artifact_path": row.get("artifact_path"),
@@ -1758,20 +2094,38 @@ class AudienceRunHistoryService:
                 },
             )
 
-    def _replace_warnings(self, conn, run_id: str, rows: List[Dict[str, Any]]) -> None:
-        conn.execute(text("DELETE FROM audience_run_warnings WHERE run_id = :run_id"), {"run_id": run_id})
+    def _replace_warnings(
+        self,
+        conn,
+        tenant_id: str,
+        run_id: str,
+        rows: List[Dict[str, Any]],
+    ) -> None:
+        normalized_tenant_id = self._tenant_id(tenant_id)
+        conn.execute(
+            text(
+                "DELETE FROM public.audience_run_warnings "
+                "WHERE tenant_id = :tenant_id AND run_id = :run_id"
+            ),
+            {
+                "tenant_id": normalized_tenant_id,
+                "run_id": run_id,
+            },
+        )
 
         for row in rows:
             conn.execute(
                 text(
                     """
-                    INSERT INTO audience_run_warnings (
+                    INSERT INTO public.audience_run_warnings (
+                        tenant_id,
                         run_id,
                         warning_type,
                         warning_message,
                         metadata
                     )
                     VALUES (
+                        :tenant_id,
                         :run_id,
                         :warning_type,
                         :warning_message,
@@ -1780,6 +2134,7 @@ class AudienceRunHistoryService:
                     """
                 ),
                 {
+                    "tenant_id": normalized_tenant_id,
                     "run_id": run_id,
                     "warning_type": row.get("warning_type") or "coverage_warning",
                     "warning_message": row.get("warning_message"),
@@ -1791,6 +2146,7 @@ class AudienceRunHistoryService:
         self,
         conn,
         *,
+        tenant_id: str,
         run_id: str,
         event_type: str,
         actor: str,
@@ -1799,13 +2155,15 @@ class AudienceRunHistoryService:
         conn.execute(
             text(
                 """
-                INSERT INTO audience_run_events (
+                INSERT INTO public.audience_run_events (
+                    tenant_id,
                     run_id,
                     event_type,
                     actor,
                     details
                 )
                 VALUES (
+                    :tenant_id,
                     :run_id,
                     :event_type,
                     :actor,
@@ -1814,6 +2172,7 @@ class AudienceRunHistoryService:
                 """
             ),
             {
+                "tenant_id": self._tenant_id(tenant_id),
                 "run_id": run_id,
                 "event_type": event_type,
                 "actor": actor,

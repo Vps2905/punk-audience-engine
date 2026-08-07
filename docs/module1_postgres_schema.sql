@@ -70,6 +70,9 @@ ON audience_lineage_events(stage);
 
 CREATE TABLE IF NOT EXISTS audience_privacy_budget_ledger (
     id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL CHECK (
+        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+    ),
     run_id TEXT NOT NULL,
     cohort_id TEXT,
     budget_scope TEXT NOT NULL,
@@ -89,10 +92,10 @@ CREATE TABLE IF NOT EXISTS audience_privacy_budget_ledger (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audience_privacy_budget_scope
-ON audience_privacy_budget_ledger(budget_scope);
+ON audience_privacy_budget_ledger(tenant_id, budget_scope);
 
 CREATE INDEX IF NOT EXISTS idx_audience_privacy_budget_run
-ON audience_privacy_budget_ledger(run_id);
+ON audience_privacy_budget_ledger(tenant_id, run_id);
 
 CREATE INDEX IF NOT EXISTS idx_audience_privacy_budget_decision
 ON audience_privacy_budget_ledger(decision);
@@ -103,7 +106,10 @@ ON audience_privacy_budget_ledger(decision);
 
 CREATE TABLE IF NOT EXISTS audience_run_history (
     id BIGSERIAL PRIMARY KEY,
-    run_id TEXT UNIQUE NOT NULL,
+    tenant_id TEXT NOT NULL CHECK (
+        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+    ),
+    run_id TEXT NOT NULL,
     prompt TEXT,
     status TEXT,
     source_mode TEXT,
@@ -130,76 +136,105 @@ CREATE TABLE IF NOT EXISTS audience_run_history (
     final_summary_path TEXT,
     business_summary_path TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_history_run
-ON audience_run_history(run_id);
+ON audience_run_history(tenant_id, run_id);
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_history_approval
-ON audience_run_history(approval_status);
+ON audience_run_history(tenant_id, approval_status);
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_history_created
-ON audience_run_history(created_at);
+ON audience_run_history(tenant_id, created_at DESC);
 
 
 CREATE TABLE IF NOT EXISTS audience_run_cohorts (
     id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL CHECK (
+        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+    ),
     run_id TEXT NOT NULL,
-    cohort_id TEXT,
-    cohort_name TEXT,
-    cohort_size INTEGER,
+    export_cohort_id TEXT NOT NULL,
+    audience_name TEXT,
+    location_name TEXT,
+    primary_poi_type TEXT,
+    created_day_part TEXT,
+    lookback_bucket TEXT,
     quality_score DOUBLE PRECISION,
+    management_quality_score DOUBLE PRECISION,
     approval_status TEXT,
-    export_status TEXT,
-    cohort_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    privacy_mode TEXT,
+    data_safety_status TEXT,
+    risk_decision TEXT,
+    risk_level TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, run_id, export_cohort_id),
+    FOREIGN KEY (tenant_id, run_id)
+    REFERENCES audience_run_history(tenant_id, run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_cohorts_run
-ON audience_run_cohorts(run_id);
+ON audience_run_cohorts(tenant_id, run_id);
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_cohorts_cohort
-ON audience_run_cohorts(cohort_id);
+ON audience_run_cohorts(tenant_id, export_cohort_id);
 
 
 CREATE TABLE IF NOT EXISTS audience_run_artifacts (
     id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL CHECK (
+        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+    ),
     run_id TEXT NOT NULL,
-    artifact_type TEXT NOT NULL,
+    artifact_type TEXT,
     artifact_path TEXT,
-    artifact_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (tenant_id, run_id)
+    REFERENCES audience_run_history(tenant_id, run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_artifacts_run
-ON audience_run_artifacts(run_id);
+ON audience_run_artifacts(tenant_id, run_id);
 
 
 CREATE TABLE IF NOT EXISTS audience_run_warnings (
     id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL CHECK (
+        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+    ),
     run_id TEXT NOT NULL,
-    warning_type TEXT NOT NULL,
+    warning_type TEXT,
     warning_message TEXT NOT NULL,
-    warning_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (tenant_id, run_id)
+    REFERENCES audience_run_history(tenant_id, run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_warnings_run
-ON audience_run_warnings(run_id);
+ON audience_run_warnings(tenant_id, run_id);
 
 
 CREATE TABLE IF NOT EXISTS audience_run_events (
     id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL CHECK (
+        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+    ),
     run_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     actor TEXT NOT NULL DEFAULT 'system',
     details JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (tenant_id, run_id)
+    REFERENCES audience_run_history(tenant_id, run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_events_run
-ON audience_run_events(run_id);
+ON audience_run_events(tenant_id, run_id);
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_events_type
 ON audience_run_events(event_type);
@@ -207,16 +242,84 @@ ON audience_run_events(event_type);
 
 CREATE TABLE IF NOT EXISTS audience_run_approvals (
     id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL CHECK (
+        tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+    ),
     run_id TEXT NOT NULL,
-    decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected', 'blocked', 'blocked_approval', 'blocked_privacy_budget')),
+    action TEXT NOT NULL,
     actor TEXT NOT NULL,
     note TEXT,
+    previous_status TEXT,
+    new_status TEXT,
     downstream_export_enabled BOOLEAN NOT NULL DEFAULT false,
-    details JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    privacy_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    artifacts_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (tenant_id, run_id)
+    REFERENCES audience_run_history(tenant_id, run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_audience_run_approvals_run
-ON audience_run_approvals(run_id);
+ON audience_run_approvals(tenant_id, run_id);
+
+-- Every connection must set the transaction-local tenant before access:
+-- SELECT set_config('app.tenant_id', '<canonical-tenant-id>', true);
+ALTER TABLE audience_run_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_history FORCE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_cohorts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_cohorts FORCE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_artifacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_artifacts FORCE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_warnings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_warnings FORCE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_approvals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audience_run_approvals FORCE ROW LEVEL SECURITY;
+ALTER TABLE audience_privacy_budget_ledger ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audience_privacy_budget_ledger FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY audience_run_history_tenant_policy
+ON audience_run_history
+USING (tenant_id = current_setting('app.tenant_id', true))
+WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+CREATE POLICY audience_run_cohorts_tenant_policy
+ON audience_run_cohorts
+USING (tenant_id = current_setting('app.tenant_id', true))
+WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+CREATE POLICY audience_run_artifacts_tenant_policy
+ON audience_run_artifacts
+USING (tenant_id = current_setting('app.tenant_id', true))
+WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+CREATE POLICY audience_run_warnings_tenant_policy
+ON audience_run_warnings
+USING (tenant_id = current_setting('app.tenant_id', true))
+WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+CREATE POLICY audience_run_events_tenant_policy
+ON audience_run_events
+USING (tenant_id = current_setting('app.tenant_id', true))
+WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+CREATE POLICY audience_run_approvals_tenant_policy
+ON audience_run_approvals
+USING (tenant_id = current_setting('app.tenant_id', true))
+WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+CREATE POLICY audience_privacy_budget_ledger_tenant_policy
+ON audience_privacy_budget_ledger
+USING (tenant_id = current_setting('app.tenant_id', true))
+WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+REVOKE ALL ON audience_run_history FROM PUBLIC;
+REVOKE ALL ON audience_run_cohorts FROM PUBLIC;
+REVOKE ALL ON audience_run_artifacts FROM PUBLIC;
+REVOKE ALL ON audience_run_warnings FROM PUBLIC;
+REVOKE ALL ON audience_run_events FROM PUBLIC;
+REVOKE ALL ON audience_run_approvals FROM PUBLIC;
+REVOKE ALL ON audience_privacy_budget_ledger FROM PUBLIC;
 
 COMMIT;

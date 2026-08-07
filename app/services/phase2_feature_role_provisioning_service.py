@@ -427,6 +427,56 @@ class Phase2FeatureRoleProvisioningService:
                 f"FROM {writer}"
             )
 
+        workflow_ready = bool(
+            connection.execute(
+                text(
+                    """
+                    SELECT
+                        to_regclass(
+                            'public.audience_fresh_data_workflows'
+                        ) IS NOT NULL
+                        AND
+                        to_regclass(
+                            'public.audience_fresh_data_workflow_events'
+                        ) IS NOT NULL
+                        AS workflow_ready
+                    """
+                )
+            ).mappings().one()["workflow_ready"]
+        )
+        if workflow_ready:
+            for table in (
+                "audience_fresh_data_workflows",
+                "audience_fresh_data_workflow_events",
+            ):
+                connection.exec_driver_sql(
+                    f"REVOKE ALL ON public.{table} FROM PUBLIC"
+                )
+                connection.exec_driver_sql(
+                    f"REVOKE ALL ON public.{table} FROM {reader}"
+                )
+            connection.exec_driver_sql(
+                "GRANT SELECT, INSERT, UPDATE ON "
+                "public.audience_fresh_data_workflows "
+                f"TO {writer}"
+            )
+            connection.exec_driver_sql(
+                "GRANT SELECT, INSERT ON "
+                "public.audience_fresh_data_workflow_events "
+                f"TO {writer}"
+            )
+            connection.exec_driver_sql(
+                "GRANT USAGE, SELECT ON SEQUENCE "
+                "public.audience_fresh_data_workflow_events_event_id_seq "
+                f"TO {writer}"
+            )
+            connection.exec_driver_sql(
+                "REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON "
+                "public.audience_fresh_data_workflows, "
+                "public.audience_fresh_data_workflow_events "
+                f"FROM {writer}"
+            )
+
     def _verify_reader(
         self,
         database_url: str,
@@ -579,7 +629,78 @@ class Phase2FeatureRoleProvisioningService:
                         current_user,
                         'public.audience_schema_migrations',
                         'SELECT'
-                    ) AS can_read_migration_ledger
+                    ) AS can_read_migration_ledger,
+                    (
+                        to_regclass(
+                            'public.audience_fresh_data_workflows'
+                        ) IS NOT NULL
+                        AND to_regclass(
+                            'public.audience_fresh_data_workflow_events'
+                        ) IS NOT NULL
+                    ) AS workflow_tables_present,
+                    CASE WHEN to_regclass(
+                        'public.audience_fresh_data_workflows'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_fresh_data_workflows',
+                        'SELECT'
+                    ) END AS can_select_fresh_data_workflows,
+                    CASE WHEN to_regclass(
+                        'public.audience_fresh_data_workflows'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_fresh_data_workflows',
+                        'INSERT'
+                    ) END AS can_insert_fresh_data_workflows,
+                    CASE WHEN to_regclass(
+                        'public.audience_fresh_data_workflows'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_fresh_data_workflows',
+                        'UPDATE'
+                    ) END AS can_update_fresh_data_workflows,
+                    CASE WHEN to_regclass(
+                        'public.audience_fresh_data_workflows'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_fresh_data_workflows',
+                        'DELETE'
+                    ) END AS can_delete_fresh_data_workflows,
+                    CASE WHEN to_regclass(
+                        'public.audience_fresh_data_workflow_events'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_fresh_data_workflow_events',
+                        'SELECT'
+                    ) END AS can_select_fresh_data_workflow_events,
+                    CASE WHEN to_regclass(
+                        'public.audience_fresh_data_workflow_events'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_fresh_data_workflow_events',
+                        'INSERT'
+                    ) END AS can_insert_fresh_data_workflow_events,
+                    CASE WHEN to_regclass(
+                        'public.audience_fresh_data_workflow_events'
+                    ) IS NULL THEN FALSE ELSE (
+                        has_table_privilege(
+                            current_user,
+                            'public.audience_fresh_data_workflow_events',
+                            'UPDATE'
+                        )
+                        OR has_table_privilege(
+                            current_user,
+                            'public.audience_fresh_data_workflow_events',
+                            'DELETE'
+                        )
+                    ) END AS can_mutate_fresh_data_workflow_events,
+                    CASE WHEN to_regclass(
+                        'public.audience_fresh_data_workflow_events_event_id_seq'
+                    ) IS NULL THEN FALSE ELSE has_sequence_privilege(
+                        current_user,
+                        'public.audience_fresh_data_workflow_events_event_id_seq',
+                        'USAGE'
+                    ) END AS can_use_fresh_data_workflow_event_sequence
                 FROM pg_roles role
                 WHERE role.rolname = current_user
                 """
@@ -620,6 +741,14 @@ class Phase2FeatureRoleProvisioningService:
             or role["can_delete_feature_sets"]
             or role["can_delete_feature_vectors"]
             or role["can_read_migration_ledger"]
+            or role["can_select_fresh_data_workflows"]
+            or role["can_insert_fresh_data_workflows"]
+            or role["can_update_fresh_data_workflows"]
+            or role["can_delete_fresh_data_workflows"]
+            or role["can_select_fresh_data_workflow_events"]
+            or role["can_insert_fresh_data_workflow_events"]
+            or role["can_mutate_fresh_data_workflow_events"]
+            or role["can_use_fresh_data_workflow_event_sequence"]
         ):
             raise RuntimeError(
                 "The Phase 2 reader role has unsafe privileges."
@@ -649,6 +778,19 @@ class Phase2FeatureRoleProvisioningService:
             or role["can_delete_feature_sets"]
             or role["can_delete_feature_vectors"]
             or role["can_read_migration_ledger"]
+            or (
+                role["workflow_tables_present"]
+                and (
+                    not role["can_select_fresh_data_workflows"]
+                    or not role["can_insert_fresh_data_workflows"]
+                    or not role["can_update_fresh_data_workflows"]
+                    or role["can_delete_fresh_data_workflows"]
+                    or not role["can_select_fresh_data_workflow_events"]
+                    or not role["can_insert_fresh_data_workflow_events"]
+                    or role["can_mutate_fresh_data_workflow_events"]
+                    or not role["can_use_fresh_data_workflow_event_sequence"]
+                )
+            )
         ):
             raise RuntimeError(
                 "The Phase 2 writer role has unsafe privileges."

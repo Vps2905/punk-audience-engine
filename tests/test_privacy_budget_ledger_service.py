@@ -12,6 +12,7 @@ def test_privacy_budget_ledger_allows_budget_when_available(tmp_path: Path):
 
     result = service.check_and_record(
         PrivacyBudgetRequest(
+            tenant_id="tenant-a",
             run_id="run_1",
             cohort_id="cohort_1",
             budget_scope="customer_1",
@@ -35,6 +36,7 @@ def test_privacy_budget_ledger_blocks_when_budget_exceeded(tmp_path: Path):
 
     first = service.check_and_record(
         PrivacyBudgetRequest(
+            tenant_id="tenant-a",
             run_id="run_1",
             cohort_id="cohort_1",
             budget_scope="customer_1",
@@ -46,6 +48,7 @@ def test_privacy_budget_ledger_blocks_when_budget_exceeded(tmp_path: Path):
 
     second = service.check_and_record(
         PrivacyBudgetRequest(
+            tenant_id="tenant-a",
             run_id="run_2",
             cohort_id="cohort_2",
             budget_scope="customer_1",
@@ -69,6 +72,7 @@ def test_privacy_budget_status_reports_remaining_budget(tmp_path: Path):
 
     service.check_and_record(
         PrivacyBudgetRequest(
+            tenant_id="tenant-a",
             run_id="run_1",
             cohort_id="cohort_1",
             budget_scope="customer_1",
@@ -78,9 +82,47 @@ def test_privacy_budget_status_reports_remaining_budget(tmp_path: Path):
         )
     )
 
-    status = service.get_budget_status("customer_1", max_budget=5.0)
+    status = service.get_budget_status(
+        "customer_1",
+        tenant_id="tenant-a",
+        max_budget=5.0,
+    )
 
     assert status["status"] == "ok"
     assert status["used_budget"] == 2.0
     assert status["remaining_budget"] == 3.0
     assert status["budget_exhausted"] is False
+
+
+def test_privacy_budget_is_isolated_by_tenant(tmp_path: Path):
+    db_url = f"sqlite:///{tmp_path / 'budget.db'}"
+    service = PrivacyBudgetLedgerService(database_url=db_url)
+
+    for tenant_id in ("tenant-a", "tenant-b"):
+        result = service.check_and_record(
+            PrivacyBudgetRequest(
+                tenant_id=tenant_id,
+                run_id="shared-run",
+                cohort_id="shared-cohort",
+                budget_scope="shared-scope",
+                epsilon=4.0,
+                max_budget=5.0,
+                actor="test",
+            )
+        )
+        assert result["status"] == "allowed"
+        assert result["budget_before"] == 0.0
+
+    tenant_a = service.get_budget_status(
+        "shared-scope",
+        tenant_id="tenant-a",
+        max_budget=5.0,
+    )
+    tenant_b = service.get_budget_status(
+        "shared-scope",
+        tenant_id="tenant-b",
+        max_budget=5.0,
+    )
+
+    assert tenant_a["used_budget"] == 4.0
+    assert tenant_b["used_budget"] == 4.0

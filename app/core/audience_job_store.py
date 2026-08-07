@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional
 
 from sqlalchemy import create_engine, text
 
+from app.core.tenant_request_auth import TENANT_PATTERN
+
 
 class AudienceJobStore:
     """
@@ -75,7 +77,13 @@ class AudienceJobStore:
 
         self.root_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def create_job(
+        self,
+        payload: Dict[str, Any],
+        *,
+        tenant_id: str,
+    ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         job_id = (
             "job_"
             f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_"
@@ -83,6 +91,7 @@ class AudienceJobStore:
         )
 
         record = {
+            "tenant_id": normalized_tenant_id,
             "job_id": job_id,
             "status": "queued",
             "created_at": self._now(),
@@ -96,29 +105,71 @@ class AudienceJobStore:
             "error": None,
         }
 
-        self.save(record)
+        self.save(record, tenant_id=normalized_tenant_id)
         return record
 
-    def get(self, job_id: str) -> Dict[str, Any]:
+    def get(
+        self,
+        job_id: str,
+        *,
+        tenant_id: str,
+    ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         if self._uses_postgres():
-            return self._get_postgres(job_id)
+            return self._get_postgres(
+                job_id,
+                tenant_id=normalized_tenant_id,
+            )
 
-        path = self._path(job_id)
+        path = self._path(
+            job_id,
+            tenant_id=normalized_tenant_id,
+        )
 
         if not path.exists():
             raise FileNotFoundError(f"Job not found: {job_id}")
 
-        return json.loads(path.read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            record_tenant_id = self._tenant_id(
+                str(record.get("tenant_id") or "")
+            )
+        except ValueError as exc:
+            raise FileNotFoundError(
+                f"Job not found: {job_id}"
+            ) from exc
+        if record_tenant_id != normalized_tenant_id:
+            raise FileNotFoundError(f"Job not found: {job_id}")
+        return record
 
-    def save(self, record: Dict[str, Any]) -> None:
+    def save(
+        self,
+        record: Dict[str, Any],
+        *,
+        tenant_id: str,
+    ) -> None:
+        normalized_tenant_id = self._tenant_id(tenant_id)
+        record_tenant_id = self._tenant_id(
+            str(record.get("tenant_id") or "")
+        )
+        if record_tenant_id != normalized_tenant_id:
+            raise ValueError(
+                "Audience job tenant ownership cannot be changed."
+            )
+
         saved = self._clean_json(dict(record))
+        saved["tenant_id"] = normalized_tenant_id
         saved["updated_at"] = self._now()
 
         if self._uses_postgres():
             self._save_postgres(saved)
         else:
-            self.root_dir.mkdir(parents=True, exist_ok=True)
-            self._path(saved["job_id"]).write_text(
+            path = self._path(
+                saved["job_id"],
+                tenant_id=normalized_tenant_id,
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
                 json.dumps(saved, indent=2, allow_nan=False),
                 encoding="utf-8",
             )
@@ -129,13 +180,18 @@ class AudienceJobStore:
         self,
         job_id: str,
         *,
+        tenant_id: str,
         status: str,
         stage: str,
         message: str,
         result: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
     ) -> Dict[str, Any]:
-        record = self.get(job_id)
+        normalized_tenant_id = self._tenant_id(tenant_id)
+        record = self.get(
+            job_id,
+            tenant_id=normalized_tenant_id,
+        )
         record["status"] = status
         record["progress"] = {
             "stage": stage,
@@ -148,25 +204,35 @@ class AudienceJobStore:
         if error is not None:
             record["error"] = error
 
-        self.save(record)
+        self.save(record, tenant_id=normalized_tenant_id)
         return record
 
-    def _get_postgres(self, job_id: str) -> Dict[str, Any]:
+    def _get_postgres(
+        self,
+        job_id: str,
+        *,
+        tenant_id: str,
+    ) -> Dict[str, Any]:
         engine = self._engine()
 
         with engine.begin() as conn:
+            self._set_tenant_context(conn, tenant_id)
             self._ensure_table(conn)
 
             row = conn.execute(
                 text(
                     """
-                    SELECT job_id, status, created_at, updated_at,
+                    SELECT tenant_id, job_id, status, created_at, updated_at,
                            payload, progress, result, error
-                    FROM audience_jobs
-                    WHERE job_id = :job_id
+                    FROM public.audience_jobs
+                    WHERE tenant_id = :tenant_id
+                      AND job_id = :job_id
                     """
                 ),
-                {"job_id": job_id},
+                {
+                    "tenant_id": tenant_id,
+                    "job_id": job_id,
+                },
             ).fetchone()
 
         if not row:
@@ -175,6 +241,7 @@ class AudienceJobStore:
         values = dict(row._mapping)
 
         return {
+            "tenant_id": values["tenant_id"],
             "job_id": values["job_id"],
             "status": values["status"],
             "created_at": self._iso(values.get("created_at")),
@@ -193,12 +260,17 @@ class AudienceJobStore:
             result_json = self._json_text(record.get("result"))
 
         with engine.begin() as conn:
+            self._set_tenant_context(
+                conn,
+                record["tenant_id"],
+            )
             self._ensure_table(conn)
 
             conn.execute(
                 text(
                     """
-                    INSERT INTO audience_jobs (
+                    INSERT INTO public.audience_jobs (
+                        tenant_id,
                         job_id,
                         status,
                         created_at,
@@ -209,6 +281,7 @@ class AudienceJobStore:
                         error
                     )
                     VALUES (
+                        :tenant_id,
                         :job_id,
                         :status,
                         CAST(:created_at AS timestamptz),
@@ -218,7 +291,7 @@ class AudienceJobStore:
                         CAST(:result AS jsonb),
                         :error
                     )
-                    ON CONFLICT (job_id)
+                    ON CONFLICT (tenant_id, job_id)
                     DO UPDATE SET
                         status = EXCLUDED.status,
                         updated_at = EXCLUDED.updated_at,
@@ -229,6 +302,7 @@ class AudienceJobStore:
                     """
                 ),
                 {
+                    "tenant_id": record["tenant_id"],
                     "job_id": record["job_id"],
                     "status": record["status"],
                     "created_at": record.get("created_at") or self._now(),
@@ -244,15 +318,17 @@ class AudienceJobStore:
         conn.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS audience_jobs (
-                    job_id TEXT PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS public.audience_jobs (
+                    tenant_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
                     progress JSONB NOT NULL DEFAULT '{}'::jsonb,
                     result JSONB,
-                    error TEXT
+                    error TEXT,
+                    PRIMARY KEY (tenant_id, job_id)
                 );
                 """
             )
@@ -261,8 +337,12 @@ class AudienceJobStore:
         conn.execute(
             text(
                 """
-                CREATE INDEX IF NOT EXISTS idx_audience_jobs_status
-                ON audience_jobs(status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_audience_jobs_tenant_status
+                ON public.audience_jobs(
+                    tenant_id,
+                    status,
+                    updated_at DESC
+                );
                 """
             )
         )
@@ -332,12 +412,39 @@ class AudienceJobStore:
     def _uses_postgres(self) -> bool:
         return self.backend in self.POSTGRES_BACKENDS
 
-    def _path(self, job_id: str) -> Path:
+    def _set_tenant_context(self, conn, tenant_id: str) -> None:
+        conn.execute(
+            text(
+                "SELECT set_config("
+                "'app.tenant_id', :tenant_id, true"
+                ")"
+            ),
+            {"tenant_id": self._tenant_id(tenant_id)},
+        )
+
+    def _tenant_id(self, tenant_id: str) -> str:
+        normalized = str(tenant_id or "").strip().lower()
+        if not TENANT_PATTERN.fullmatch(normalized):
+            raise ValueError("Invalid tenant identifier.")
+        return normalized
+
+    def _path(
+        self,
+        job_id: str,
+        *,
+        tenant_id: str,
+    ) -> Path:
         safe_job_id = "".join(
             ch for ch in job_id
             if ch.isalnum() or ch in {"_", "-"}
         )
-        return self.root_dir / f"{safe_job_id}.json"
+        if not safe_job_id or safe_job_id != job_id:
+            raise FileNotFoundError(f"Job not found: {job_id}")
+        return (
+            self.root_dir
+            / self._tenant_id(tenant_id)
+            / f"{safe_job_id}.json"
+        )
 
     def _json_text(self, value: Any) -> str:
         return json.dumps(

@@ -16,6 +16,7 @@ def test_history_service_skips_without_db_url(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
     report = AudienceRunHistoryService().persist_run(
+        tenant_id="tenant-a",
         final_summary={
             "run_id": "run_test",
             "prompt": "restaurant audience",
@@ -26,6 +27,23 @@ def test_history_service_skips_without_db_url(monkeypatch):
 
     assert report["status"] == "skipped"
     assert report["reason"] == "no_database_url"
+
+
+def test_history_service_rejects_summary_tenant_mismatch():
+    service = AudienceRunHistoryService()
+
+    try:
+        service.persist_run(
+            tenant_id="tenant-a",
+            final_summary={
+                "tenant_id": "tenant-b",
+                "run_id": "run_test",
+            },
+        )
+    except ValueError as exc:
+        assert "tenant ownership" in str(exc)
+    else:
+        raise AssertionError("tenant mismatch was not rejected")
 
 
 def test_build_cohort_rows_maps_sensitive_risk():

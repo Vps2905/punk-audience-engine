@@ -106,6 +106,7 @@ def test_background_failure_persists_sanitized_error(
 
         def __init__(self):
             self.record = {
+                "tenant_id": "tenant-a",
                 "job_id": "job_failure_test",
                 "payload": {
                     "prompt": "Find cafe visitors",
@@ -113,10 +114,12 @@ def test_background_failure_persists_sanitized_error(
             }
             self.updates = []
 
-        def get(self, job_id):
+        def get(self, job_id, *, tenant_id):
+            assert tenant_id == "tenant-a"
             return self.record
 
-        def update_status(self, job_id, **kwargs):
+        def update_status(self, job_id, *, tenant_id, **kwargs):
+            assert tenant_id == "tenant-a"
             self.updates.append(
                 {
                     "job_id": job_id,
@@ -143,7 +146,7 @@ def test_background_failure_persists_sanitized_error(
         lambda: BrokenAgent(),
     )
 
-    jobs._run_job_background("job_failure_test")
+    jobs._run_job_background("job_failure_test", "tenant-a")
 
     failed = store.updates[-1]
 

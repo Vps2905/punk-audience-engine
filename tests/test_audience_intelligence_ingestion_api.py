@@ -4,7 +4,10 @@ from app.main import app
 
 
 def _headers():
-    return {"x-audience-api-key": "test-key"}
+    return {
+        "x-audience-api-key": "test-key",
+        "x-audience-tenant-id": "tenant-a",
+    }
 
 
 def _events():

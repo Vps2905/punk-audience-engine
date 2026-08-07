@@ -8,7 +8,10 @@ def test_module_1_status_requires_api_key(monkeypatch):
     monkeypatch.setenv("REQUIRE_AUDIENCE_API_KEY", "true")
     client = TestClient(app)
 
-    response = client.get("/api/audience-intelligence/module-1/status")
+    response = client.get(
+        "/api/audience-intelligence/module-1/status",
+        headers={"x-audience-tenant-id": "tenant-a"},
+    )
 
     assert response.status_code in {401, 403}
 
@@ -24,7 +27,10 @@ def test_module_1_status_returns_safe_readiness_summary(monkeypatch):
 
     response = client.get(
         "/api/audience-intelligence/module-1/status",
-        headers={"x-audience-api-key": "test-key"},
+        headers={
+            "x-audience-api-key": "test-key",
+            "x-audience-tenant-id": "tenant-a",
+        },
     )
 
     assert response.status_code == 200
@@ -46,6 +52,8 @@ def test_module_1_status_returns_safe_readiness_summary(monkeypatch):
     assert payload["privacy_controls"]["privacy_budget_ledger"] is True
     assert payload["privacy_controls"]["lineage_logging"] is True
     assert payload["privacy_controls"]["legacy_route_auth_protection"] is True
+    assert payload["privacy_controls"]["verified_tenant_request_boundary"] is True
+    assert payload["privacy_controls"]["request_id_propagation"] is True
 
     text = str(payload)
     assert "secret-user" not in text

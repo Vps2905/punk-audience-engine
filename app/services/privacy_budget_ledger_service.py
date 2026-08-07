@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 
 from sqlalchemy import create_engine, text
 
+from app.core.tenant_request_auth import TENANT_PATTERN
+
 
 @dataclass(frozen=True)
 class PrivacyBudgetRequest:
@@ -29,6 +31,7 @@ class PrivacyBudgetRequest:
             cohort_abc
     """
 
+    tenant_id: str
     run_id: str
     budget_scope: str
     epsilon: float
@@ -59,6 +62,7 @@ class PrivacyBudgetLedgerService:
 
     def check_and_record(self, request: PrivacyBudgetRequest) -> Dict[str, Any]:
         self._validate_request(request)
+        tenant_id = self._tenant_id(request.tenant_id)
 
         db_url = self._db_url()
         if not db_url:
@@ -71,9 +75,18 @@ class PrivacyBudgetLedgerService:
         engine = create_engine(self._connection_url(db_url))
 
         with engine.begin() as conn:
+            self._set_tenant_context(
+                conn,
+                tenant_id,
+                engine.dialect.name,
+            )
             self._ensure_table(conn, engine.dialect.name)
 
-            used_before = self._used_budget(conn, request.budget_scope)
+            used_before = self._used_budget(
+                conn,
+                tenant_id=tenant_id,
+                budget_scope=request.budget_scope,
+            )
             requested_epsilon = float(request.epsilon)
             budget_after_if_allowed = used_before + requested_epsilon
 
@@ -92,6 +105,7 @@ class PrivacyBudgetLedgerService:
                 text(
                     """
                     INSERT INTO audience_privacy_budget_ledger (
+                        tenant_id,
                         run_id,
                         cohort_id,
                         budget_scope,
@@ -110,6 +124,7 @@ class PrivacyBudgetLedgerService:
                         created_at
                     )
                     VALUES (
+                        :tenant_id,
                         :run_id,
                         :cohort_id,
                         :budget_scope,
@@ -130,6 +145,7 @@ class PrivacyBudgetLedgerService:
                     """
                 ),
                 {
+                    "tenant_id": tenant_id,
                     "run_id": request.run_id,
                     "cohort_id": request.cohort_id,
                     "budget_scope": request.budget_scope,
@@ -153,6 +169,7 @@ class PrivacyBudgetLedgerService:
             "enabled": True,
             "status": decision,
             "spent": spent,
+            "tenant_id": tenant_id,
             "run_id": request.run_id,
             "cohort_id": request.cohort_id,
             "budget_scope": request.budget_scope,
@@ -171,7 +188,14 @@ class PrivacyBudgetLedgerService:
             ),
         }
 
-    def get_budget_status(self, budget_scope: str, max_budget: float = 5.0) -> Dict[str, Any]:
+    def get_budget_status(
+        self,
+        budget_scope: str,
+        *,
+        tenant_id: str,
+        max_budget: float = 5.0,
+    ) -> Dict[str, Any]:
+        normalized_tenant_id = self._tenant_id(tenant_id)
         db_url = self._db_url()
         if not db_url:
             return {
@@ -183,12 +207,22 @@ class PrivacyBudgetLedgerService:
         engine = create_engine(self._connection_url(db_url))
 
         with engine.begin() as conn:
+            self._set_tenant_context(
+                conn,
+                normalized_tenant_id,
+                engine.dialect.name,
+            )
             self._ensure_table(conn, engine.dialect.name)
-            used = self._used_budget(conn, budget_scope)
+            used = self._used_budget(
+                conn,
+                tenant_id=normalized_tenant_id,
+                budget_scope=budget_scope,
+            )
 
         return {
             "enabled": True,
             "status": "ok",
+            "tenant_id": normalized_tenant_id,
             "budget_scope": budget_scope,
             "used_budget": used,
             "max_budget": max_budget,
@@ -196,17 +230,27 @@ class PrivacyBudgetLedgerService:
             "budget_exhausted": used >= max_budget,
         }
 
-    def _used_budget(self, conn, budget_scope: str) -> float:
+    def _used_budget(
+        self,
+        conn,
+        *,
+        tenant_id: str,
+        budget_scope: str,
+    ) -> float:
         value = conn.execute(
             text(
                 """
                 SELECT COALESCE(SUM(epsilon), 0)
                 FROM audience_privacy_budget_ledger
-                WHERE budget_scope = :budget_scope
+                WHERE tenant_id = :tenant_id
+                  AND budget_scope = :budget_scope
                   AND decision = 'allowed'
                 """
             ),
-            {"budget_scope": budget_scope},
+            {
+                "tenant_id": self._tenant_id(tenant_id),
+                "budget_scope": budget_scope,
+            },
         ).scalar()
 
         return float(value or 0.0)
@@ -218,6 +262,9 @@ class PrivacyBudgetLedgerService:
                     """
                     CREATE TABLE IF NOT EXISTS audience_privacy_budget_ledger (
                         id BIGSERIAL PRIMARY KEY,
+                        tenant_id TEXT NOT NULL CHECK (
+                            tenant_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'
+                        ),
                         run_id TEXT NOT NULL,
                         cohort_id TEXT,
                         budget_scope TEXT NOT NULL,
@@ -244,6 +291,7 @@ class PrivacyBudgetLedgerService:
                     """
                     CREATE TABLE IF NOT EXISTS audience_privacy_budget_ledger (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tenant_id TEXT NOT NULL,
                         run_id TEXT NOT NULL,
                         cohort_id TEXT,
                         budget_scope TEXT NOT NULL,
@@ -269,16 +317,62 @@ class PrivacyBudgetLedgerService:
             text(
                 """
                 CREATE INDEX IF NOT EXISTS idx_audience_privacy_budget_scope
-                ON audience_privacy_budget_ledger(budget_scope)
+                ON audience_privacy_budget_ledger(
+                    tenant_id,
+                    budget_scope
+                )
                 """
             )
         )
+
+        if dialect_name == "postgresql":
+            conn.execute(
+                text(
+                    "ALTER TABLE public."
+                    "audience_privacy_budget_ledger "
+                    "ENABLE ROW LEVEL SECURITY"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE public."
+                    "audience_privacy_budget_ledger "
+                    "FORCE ROW LEVEL SECURITY"
+                )
+            )
+            conn.execute(
+                text(
+                    "DROP POLICY IF EXISTS "
+                    "audience_privacy_budget_ledger_tenant_policy "
+                    "ON public.audience_privacy_budget_ledger"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE POLICY "
+                    "audience_privacy_budget_ledger_tenant_policy "
+                    "ON public.audience_privacy_budget_ledger "
+                    "USING (tenant_id = current_setting("
+                    "'app.tenant_id', true)) "
+                    "WITH CHECK (tenant_id = current_setting("
+                    "'app.tenant_id', true))"
+                )
+            )
+            conn.execute(
+                text(
+                    "REVOKE ALL ON public."
+                    "audience_privacy_budget_ledger FROM PUBLIC"
+                )
+            )
 
         conn.execute(
             text(
                 """
                 CREATE INDEX IF NOT EXISTS idx_audience_privacy_budget_run
-                ON audience_privacy_budget_ledger(run_id)
+                ON audience_privacy_budget_ledger(
+                    tenant_id,
+                    run_id
+                )
                 """
             )
         )
@@ -301,7 +395,32 @@ class PrivacyBudgetLedgerService:
             return "postgresql://" + db_url[len("postgres://") :]
         return db_url
 
+    def _tenant_id(self, tenant_id: str) -> str:
+        normalized = str(tenant_id or "").strip().lower()
+        if not TENANT_PATTERN.fullmatch(normalized):
+            raise ValueError("Invalid tenant identifier.")
+        return normalized
+
+    def _set_tenant_context(
+        self,
+        conn,
+        tenant_id: str,
+        dialect_name: str,
+    ) -> None:
+        if dialect_name != "postgresql":
+            return
+        conn.execute(
+            text(
+                "SELECT set_config("
+                "'app.tenant_id', :tenant_id, true"
+                ")"
+            ),
+            {"tenant_id": self._tenant_id(tenant_id)},
+        )
+
     def _validate_request(self, request: PrivacyBudgetRequest) -> None:
+        self._tenant_id(request.tenant_id)
+
         if not request.run_id:
             raise ValueError("run_id is required")
 

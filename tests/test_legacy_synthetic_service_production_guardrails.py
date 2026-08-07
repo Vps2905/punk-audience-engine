@@ -135,7 +135,10 @@ def test_legacy_synthetic_route_returns_400_for_blocked_sdv(monkeypatch, tmp_pat
 
     response = client.post(
         f"/synthetic/generate/{job_id}?num_rows=10&use_sdv=true&production_mode=true",
-        headers={"x-audience-api-key": "test-key"},
+        headers={
+            "x-audience-api-key": "test-key",
+            "x-audience-tenant-id": "tenant-a",
+        },
     )
 
     assert response.status_code == 400

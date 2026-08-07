@@ -450,3 +450,41 @@ def test_failed_distributed_dispatch_retries_idempotently(tmp_path: Path):
     assert second["distributed_job_id"] == "distributed-job-1"
     assert len(launcher.requests) == 2
     assert store.read_count == 0
+
+
+def test_completed_ingestion_persists_exact_canonical_manifest_metadata(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AUDIENCE_HASH_SALT", "gateway-test-salt")
+    payload = _payload()
+    store = FakeObjectStore(payload)
+    db_url = f"sqlite:///{tmp_path / 'gateway-metadata.db'}"
+    state = ProviderIngestionStateService(database_url=db_url)
+    gateway = ProviderObjectIngestionGatewayService(
+        state_service=state,
+        object_store=store,
+        privacy_pipeline=PrivacyIngestionPipelineService(
+            database_url=db_url
+        ),
+    )
+
+    result = _ingest(gateway, payload)
+    record = state.get(result["ingestion_id"])
+    metadata = record["metadata"]
+
+    assert metadata["canonical_checksum_sha256"] == hashlib.sha256(
+        store.writes[0]["payload"]
+    ).hexdigest()
+    assert metadata["canonical_object_version"] == "canonical-version-1"
+    assert metadata["canonical_object_version_kind"] == "s3_version_id"
+    assert metadata["canonical_size_bytes"] == len(
+        store.writes[0]["payload"]
+    )
+    assert set(metadata["canonical_privacy_controls"]) >= {
+        "daily_contribution_bounding",
+        "k_anonymity",
+        "differential_privacy",
+        "no_identifier_output",
+    }
+    assert metadata["rights_status"] == "permitted"

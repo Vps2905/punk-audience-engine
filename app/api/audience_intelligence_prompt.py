@@ -13,7 +13,10 @@ from app.agents.audience_intelligence_orchestrator_agent import AudienceIntellig
 from app.agents.audience_supervisor_agent import build_audience_execution_agent
 from app.services.audience_run_history_service import AudienceRunHistoryService
 
-from app.core.api_key_auth import require_audience_api_key
+from app.core.audience_request_context import (
+    AudienceRequestContext,
+    require_authenticated_audience_request,
+)
 from app.core.production_guardrails import local_file_storage_allowed
 
 router = APIRouter(
@@ -467,8 +470,13 @@ def _build_prompt_api_response(
     return response
 
 
-@router.post("/run", dependencies=[Depends(require_audience_api_key)])
-def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
+@router.post("/run")
+def run_audience_prompt(
+    request: AudiencePromptRequest,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
     try:
         agent = _audience_execution_agent()
 
@@ -508,8 +516,12 @@ def run_audience_prompt(request: AudiencePromptRequest) -> Dict[str, Any]:
             )
             result["business_summary_path"] = business_summary_path
         result["business_summary"] = business_summary
+        result["tenant_id"] = context.tenant_id
 
-        run_history = AudienceRunHistoryService().persist_run(final_summary=result)
+        run_history = AudienceRunHistoryService().persist_run(
+            tenant_id=context.tenant_id,
+            final_summary=result,
+        )
         result["run_history"] = run_history
 
         return _build_prompt_api_response(
@@ -565,6 +577,16 @@ def audience_prompt_ui() -> str:
     <input id="apiKey" type="password" placeholder="Paste local API key from .env" />
   </div>
 
+  <div class="row">
+    <label>Audience Tenant ID</label>
+    <input id="tenantId" placeholder="Example: punk_internal" />
+  </div>
+
+  <div class="row">
+    <label>Tenant Signature (required in production)</label>
+    <input id="tenantSignature" type="password" placeholder="Leave blank only for local development" />
+  </div>
+
   <button onclick="runPrompt()">Run Audience Intelligence</button>
 
   <h2>Result</h2>
@@ -590,9 +612,18 @@ def audience_prompt_ui() -> str:
       };
 
       try {
+        const headers = {
+          "Content-Type": "application/json",
+          "X-Audience-API-Key": document.getElementById("apiKey").value.trim(),
+          "X-Audience-Tenant-Id": document.getElementById("tenantId").value.trim()
+        };
+        const tenantSignature = document.getElementById("tenantSignature").value.trim();
+        if (tenantSignature) {
+          headers["X-Audience-Tenant-Signature"] = tenantSignature;
+        }
         const res = await fetch("/api/audience-intelligence/prompt/run", {
           method: "POST",
-          headers: {"Content-Type": "application/json", "X-Audience-API-Key": document.getElementById("apiKey").value.trim()},
+          headers: headers,
           body: JSON.stringify(payload)
         });
 
@@ -647,4 +678,3 @@ def audience_prompt_ui() -> str:
 </body>
 </html>
 """
-

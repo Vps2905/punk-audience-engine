@@ -19,6 +19,7 @@ def test_privacy_budget_request_uses_final_summary_defaults():
     }
 
     request = service._privacy_budget_request_for_run(
+        tenant_id="tenant-a",
         run_id="run_1",
         run=run,
         actor="reviewer",
@@ -26,6 +27,7 @@ def test_privacy_budget_request_uses_final_summary_defaults():
     )
 
     assert request.run_id == "run_1"
+    assert request.tenant_id == "tenant-a"
     assert request.epsilon == 1.0
     assert request.delta == 1e-5
     assert request.sensitivity == 1.0
@@ -53,6 +55,7 @@ def test_privacy_budget_request_allows_final_summary_override():
     }
 
     request = service._privacy_budget_request_for_run(
+        tenant_id="tenant-a",
         run_id="run_2",
         run=run,
         actor="reviewer",

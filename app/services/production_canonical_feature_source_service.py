@@ -50,7 +50,11 @@ class ProductionCanonicalFeatureSourceService:
             key=key,
             size_bytes=manifest.source_size_bytes,
             content_type="application/x-ndjson",
-            version_id=manifest.source_version,
+            version_id=(
+                manifest.source_version
+                if manifest.source_version_kind == "s3_version_id"
+                else None
+            ),
             checksum_sha256=manifest.source_fingerprint,
         )
         payload = self._object_store.read_object(

@@ -1,0 +1,994 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Punk Audience Intelligence production runtime plane. This template creates
+  an isolated, encrypted, multi-AZ ECS and PostgreSQL foundation. Deployment
+  requires a reviewed change set and never enables application release gates.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{2,31}$"
+  VpcCidr:
+    Type: String
+    Default: 10.40.0.0/16
+  PublicSubnetACidr:
+    Type: String
+    Default: 10.40.0.0/24
+  PublicSubnetBCidr:
+    Type: String
+    Default: 10.40.1.0/24
+  PrivateAppSubnetACidr:
+    Type: String
+    Default: 10.40.10.0/24
+  PrivateAppSubnetBCidr:
+    Type: String
+    Default: 10.40.11.0/24
+  PrivateDbSubnetACidr:
+    Type: String
+    Default: 10.40.20.0/24
+  PrivateDbSubnetBCidr:
+    Type: String
+    Default: 10.40.21.0/24
+  ContainerImage:
+    Type: String
+    Description: Immutable ECR image reference including an sha256 digest.
+    AllowedPattern: "^.+@sha256:[0-9a-f]{64}$"
+  TlsCertificateArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:acm:[^:]+:[0-9]{12}:certificate/.+$"
+  WebAclArn:
+    Type: String
+    Default: ""
+  RuntimeSecretArn:
+    Type: String
+    NoEcho: true
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+  DatabaseSecretArn:
+    Type: String
+    NoEcho: true
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+  DataKmsKeyArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/.+$"
+  SecretsKmsKeyArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/.+$"
+  CanonicalBucketArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:s3:::[a-z0-9][a-z0-9.-]+$"
+  ProviderLandingBucketArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:s3:::[a-z0-9][a-z0-9.-]+$"
+  ProviderQueueArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:sqs:[^:]+:[0-9]{12}:.+$"
+  ProviderQueueUrl:
+    Type: String
+    AllowedPattern: "^https://.+$"
+  ProviderDlqArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:sqs:[^:]+:[0-9]{12}:.+$"
+  ProviderDlqUrl:
+    Type: String
+    AllowedPattern: "^https://.+$"
+  AlertTopicArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:sns:[^:]+:[0-9]{12}:.+$"
+  AllowedIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+  ProductionAllowedHosts:
+    Type: String
+    MinLength: 3
+  ProductionCorsOrigins:
+    Type: String
+    AllowedPattern: "^https://.+$"
+  ApiDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 20
+  ApiMaximumCount:
+    Type: Number
+    Default: 10
+    MinValue: 2
+    MaxValue: 100
+  WorkerDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 50
+  WorkerMaximumCount:
+    Type: Number
+    Default: 20
+    MinValue: 2
+    MaxValue: 200
+  DatabaseEngineVersion:
+    Type: String
+    Description: Operator-approved PostgreSQL version supported in the region.
+  DatabaseParameterFamily:
+    Type: String
+    Default: postgres16
+    AllowedPattern: "^postgres[0-9]+$"
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.r6g.large
+  DatabaseAllocatedStorageGiB:
+    Type: Number
+    Default: 200
+    MinValue: 100
+    MaxValue: 16384
+
+Conditions:
+  AttachWebAcl: !Not [!Equals [!Ref WebAclArn, ""]]
+
+Resources:
+  RuntimeVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-punk-runtime"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref RuntimeVpc
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RuntimeVpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnetACidr
+      MapPublicIpOnLaunch: false
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RuntimeVpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnetBCidr
+      MapPublicIpOnLaunch: false
+  PrivateAppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RuntimeVpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PrivateAppSubnetACidr
+      MapPublicIpOnLaunch: false
+  PrivateAppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RuntimeVpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PrivateAppSubnetBCidr
+      MapPublicIpOnLaunch: false
+  PrivateDbSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RuntimeVpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PrivateDbSubnetACidr
+      MapPublicIpOnLaunch: false
+  PrivateDbSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RuntimeVpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PrivateDbSubnetBCidr
+      MapPublicIpOnLaunch: false
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RuntimeVpc
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+  PublicSubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetB
+
+  NatEipA:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+  NatEipB:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+
+  PrivateAppRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RuntimeVpc
+  PrivateAppRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RuntimeVpc
+  PrivateAppDefaultRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateAppRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+  PrivateAppDefaultRouteB:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateAppRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+  PrivateAppSubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateAppRouteTableA
+      SubnetId: !Ref PrivateAppSubnetA
+  PrivateAppSubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateAppRouteTableB
+      SubnetId: !Ref PrivateAppSubnetB
+
+  PrivateDbRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RuntimeVpc
+  PrivateDbSubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateDbRouteTable
+      SubnetId: !Ref PrivateDbSubnetA
+  PrivateDbSubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateDbRouteTable
+      SubnetId: !Ref PrivateDbSubnetB
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref RuntimeVpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateAppRouteTableA
+        - !Ref PrivateAppRouteTableB
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TLS ingress to the Punk Audience API
+      VpcId: !Ref RuntimeVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedIngressCidr
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedIngressCidr
+  RuntimeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private ECS runtime tasks
+      VpcId: !Ref RuntimeVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL accessible only from ECS tasks
+      VpcId: !Ref RuntimeVpc
+      SecurityGroupEgress: []
+  RuntimeToDatabaseEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref RuntimeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
+  DatabaseFromRuntimeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref RuntimeSecurityGroup
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private multi-AZ database subnets
+      SubnetIds:
+        - !Ref PrivateDbSubnetA
+        - !Ref PrivateDbSubnetB
+  DatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Enforce encrypted PostgreSQL client connections
+      Family: !Ref DatabaseParameterFamily
+      Parameters:
+        rds.force_ssl: "1"
+  DatabaseMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+  RuntimeDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBName: punk_audience
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      AllocatedStorage: !Ref DatabaseAllocatedStorageGiB
+      MaxAllocatedStorage: 4096
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !Ref DataKmsKeyArn
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DatabaseSecretArn}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DatabaseSecretArn}:SecretString:password}}"
+      MultiAZ: true
+      PubliclyAccessible: false
+      DeletionProtection: true
+      BackupRetentionPeriod: 35
+      PreferredBackupWindow: 02:00-03:00
+      PreferredMaintenanceWindow: sun:03:30-sun:04:30
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DeleteAutomatedBackups: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsKMSKeyId: !Ref DataKmsKeyArn
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt DatabaseMonitoringRole.Arn
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref DatabaseParameterGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+
+  RuntimeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !Ref DataKmsKeyArn
+      RetentionInDays: 90
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: !Ref DataKmsKeyArn
+      RetentionInDays: 90
+
+  RuntimeCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: NONE
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      Policies:
+        - PolicyName: RuntimeSecretInjection
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref RuntimeSecretArn
+                  - !Ref DatabaseSecretArn
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref SecretsKmsKeyArn
+  ApiTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+  ProviderWorkerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AudienceRuntimeDataPlane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "${ProviderLandingBucketArn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub "${CanonicalBucketArn}/*"
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:GetQueueAttributes
+                  - sqs:SendMessage
+                Resource:
+                  - !Ref ProviderQueueArn
+                  - !Ref ProviderDlqArn
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref DataKmsKeyArn
+
+  ApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${EnvironmentName}-punk-audience-api"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "2048"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ApiTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: audience-api
+          Image: !Ref ContainerImage
+          Essential: true
+          Command: [python, scripts/production_runtime_entrypoint.py, api]
+          User: "10001:10001"
+          ReadonlyRootFilesystem: true
+          LinuxParameters:
+            Capabilities:
+              Drop: [ALL]
+            InitProcessEnabled: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          HealthCheck:
+            Command: [CMD-SHELL, "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          StopTimeout: 120
+          Environment:
+            - Name: APP_ENV
+              Value: production
+            - Name: PRODUCTION_MODE
+              Value: "true"
+            - Name: REQUIRE_AUDIENCE_API_KEY
+              Value: "true"
+            - Name: REQUIRE_PUNK_AI_TENANT_SIGNATURE
+              Value: "true"
+            - Name: ALLOW_LOCAL_FILE_STORAGE
+              Value: "false"
+            - Name: ALLOW_DEMO_ROUTES
+              Value: "false"
+            - Name: SECURITY_HEADERS_ENABLED
+              Value: "true"
+            - Name: EXPOSE_API_DOCS
+              Value: "false"
+            - Name: REQUIRE_DATABASE_TLS
+              Value: "true"
+            - Name: REQUIRE_OUTBOUND_TLS
+              Value: "true"
+            - Name: SECRETS_INJECTED_BY_SECRET_MANAGER
+              Value: "true"
+            - Name: CONTAINER_RUNTIME_NON_ROOT
+              Value: "true"
+            - Name: CONTAINER_ROOT_FILESYSTEM_READ_ONLY
+              Value: "true"
+            - Name: CONTAINER_NO_NEW_PRIVILEGES
+              Value: "true"
+            - Name: SECURITY_PRODUCTION_RELEASE_ENABLED
+              Value: "false"
+            - Name: PRODUCTION_ALLOWED_HOSTS
+              Value: !Ref ProductionAllowedHosts
+            - Name: PRODUCTION_CORS_ORIGINS
+              Value: !Ref ProductionCorsOrigins
+            - Name: MAX_REQUEST_BODY_BYTES
+              Value: "10485760"
+            - Name: VECTOR_BACKEND
+              Value: postgres_array
+            - Name: EMBEDDING_BACKEND
+              Value: sklearn_hashing
+            - Name: ALL_SAFE_COHORT_EMBEDDING_STORE
+              Value: postgres
+            - Name: INFRASTRUCTURE_APPLY_ENABLED
+              Value: "false"
+            - Name: INFRASTRUCTURE_PRODUCTION_TRAFFIC_ENABLED
+              Value: "false"
+            - Name: PROVIDER_SQS_QUEUE_URL
+              Value: !Ref ProviderQueueUrl
+            - Name: DATABASE_HOST
+              Value: !GetAtt RuntimeDatabase.Endpoint.Address
+            - Name: DATABASE_PORT
+              Value: !GetAtt RuntimeDatabase.Endpoint.Port
+            - Name: DATABASE_NAME
+              Value: punk_audience
+          Secrets:
+            - Name: AUDIENCE_API_KEY
+              ValueFrom: !Sub "${RuntimeSecretArn}:AUDIENCE_API_KEY::"
+            - Name: PUNK_AI_TENANT_AUTH_SECRET
+              ValueFrom: !Sub "${RuntimeSecretArn}:PUNK_AI_TENANT_AUTH_SECRET::"
+            - Name: HASH_SECRET
+              ValueFrom: !Sub "${RuntimeSecretArn}:HASH_SECRET::"
+            - Name: AUDIENCE_HASH_SALT
+              ValueFrom: !Sub "${RuntimeSecretArn}:AUDIENCE_HASH_SALT::"
+            - Name: DATABASE_USER
+              ValueFrom: !Sub "${DatabaseSecretArn}:username::"
+            - Name: DATABASE_PASSWORD
+              ValueFrom: !Sub "${DatabaseSecretArn}:password::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref RuntimeLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${EnvironmentName}-punk-provider-worker"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "2048"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ProviderWorkerTaskRole.Arn
+      ContainerDefinitions:
+        - Name: provider-worker
+          Image: !Ref ContainerImage
+          Essential: true
+          User: "10001:10001"
+          ReadonlyRootFilesystem: true
+          Command: [python, scripts/production_runtime_entrypoint.py, worker]
+          LinuxParameters:
+            Capabilities:
+              Drop: [ALL]
+            InitProcessEnabled: true
+          StopTimeout: 120
+          Environment:
+            - Name: APP_ENV
+              Value: production
+            - Name: PRODUCTION_MODE
+              Value: "true"
+            - Name: PROVIDER_GATEWAY_ENABLED
+              Value: "true"
+            - Name: ALLOW_LOCAL_FILE_STORAGE
+              Value: "false"
+            - Name: ALLOW_DEMO_ROUTES
+              Value: "false"
+            - Name: PROVIDER_SQS_QUEUE_URL
+              Value: !Ref ProviderQueueUrl
+            - Name: PROVIDER_SQS_DLQ_URL
+              Value: !Ref ProviderDlqUrl
+            - Name: PROVIDER_S3_REGION
+              Value: !Ref AWS::Region
+            - Name: CANONICAL_S3_BUCKET
+              Value: !Select [5, !Split [":", !Ref CanonicalBucketArn]]
+            - Name: CANONICAL_S3_SERVER_SIDE_ENCRYPTION
+              Value: aws:kms
+            - Name: CANONICAL_S3_KMS_KEY_ID
+              Value: !Ref DataKmsKeyArn
+            - Name: DATABASE_HOST
+              Value: !GetAtt RuntimeDatabase.Endpoint.Address
+            - Name: DATABASE_PORT
+              Value: !GetAtt RuntimeDatabase.Endpoint.Port
+            - Name: DATABASE_NAME
+              Value: punk_audience
+            - Name: INFRASTRUCTURE_APPLY_ENABLED
+              Value: "false"
+            - Name: INFRASTRUCTURE_PRODUCTION_TRAFFIC_ENABLED
+              Value: "false"
+          Secrets:
+            - Name: AUDIENCE_DP_SEED_SECRET
+              ValueFrom: !Sub "${RuntimeSecretArn}:AUDIENCE_DP_SEED_SECRET::"
+            - Name: AUDIENCE_TOKENIZATION_HMAC_KEY
+              ValueFrom: !Sub "${RuntimeSecretArn}:AUDIENCE_TOKENIZATION_HMAC_KEY::"
+            - Name: DATABASE_USER
+              ValueFrom: !Sub "${DatabaseSecretArn}:username::"
+            - Name: DATABASE_PASSWORD
+              ValueFrom: !Sub "${DatabaseSecretArn}:password::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
+  AlbLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLoadBalancerLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  AlbLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AlbLogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: logdelivery.elasticloadbalancing.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AlbLogBucket.Arn
+          - Effect: Allow
+            Principal:
+              Service: logdelivery.elasticloadbalancing.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${AlbLogBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: AlbLogBucketPolicy
+    Properties:
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value: "true"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+        - Key: routing.http.desync_mitigation_mode
+          Value: strictest
+        - Key: routing.http2.enabled
+          Value: "true"
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref AlbLogBucket
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref RuntimeVpc
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8000
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "60"
+        - Key: slow_start.duration_seconds
+          Value: "30"
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref TlsCertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+  HttpRedirectListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: AttachWebAcl
+    Properties:
+      ResourceArn: !Ref PublicLoadBalancer
+      WebACLArn: !Ref WebAclArn
+
+  ApiService:
+    Type: AWS::ECS::Service
+    DependsOn: HttpsListener
+    Properties:
+      Cluster: !Ref RuntimeCluster
+      TaskDefinition: !Ref ApiTaskDefinition
+      DesiredCount: !Ref ApiDesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      EnableExecuteCommand: false
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref RuntimeSecurityGroup
+          Subnets:
+            - !Ref PrivateAppSubnetA
+            - !Ref PrivateAppSubnetB
+      LoadBalancers:
+        - ContainerName: audience-api
+          ContainerPort: 8000
+          TargetGroupArn: !Ref ApiTargetGroup
+      PropagateTags: SERVICE
+  WorkerService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref RuntimeCluster
+      TaskDefinition: !Ref WorkerTaskDefinition
+      DesiredCount: !Ref WorkerDesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      EnableExecuteCommand: false
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref RuntimeSecurityGroup
+          Subnets:
+            - !Ref PrivateAppSubnetA
+            - !Ref PrivateAppSubnetB
+      PropagateTags: SERVICE
+
+  ApiScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Join ["/", [service, !Ref RuntimeCluster, !GetAtt ApiService.Name]]
+      MinCapacity: !Ref ApiDesiredCount
+      MaxCapacity: !Ref ApiMaximumCount
+  ApiCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${EnvironmentName}-api-cpu-target"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ApiScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+  WorkerScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Join ["/", [service, !Ref RuntimeCluster, !GetAtt WorkerService.Name]]
+      MinCapacity: !Ref WorkerDesiredCount
+      MaxCapacity: !Ref WorkerMaximumCount
+  WorkerCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${EnvironmentName}-worker-cpu-target"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WorkerScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  ApiHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref RuntimeCluster
+        - Name: ServiceName
+          Value: !GetAtt ApiService.Name
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopicArn]
+  UnhealthyTargetAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt PublicLoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt ApiTargetGroup.TargetGroupFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopicArn]
+  LoadBalancer5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt PublicLoadBalancer.LoadBalancerFullName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+  DatabaseHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RuntimeDatabase
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopicArn]
+  DatabaseFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RuntimeDatabase
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 21474836480
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+Outputs:
+  VpcId:
+    Value: !Ref RuntimeVpc
+  PrivateAppSubnetIds:
+    Value: !Join [",", [!Ref PrivateAppSubnetA, !Ref PrivateAppSubnetB]]
+  RuntimeSecurityGroupId:
+    Value: !Ref RuntimeSecurityGroup
+  DatabaseEndpoint:
+    Value: !GetAtt RuntimeDatabase.Endpoint.Address
+  LoadBalancerDnsName:
+    Value: !GetAtt PublicLoadBalancer.DNSName
+  EcsClusterArn:
+    Value: !GetAtt RuntimeCluster.Arn
+  ApiServiceName:
+    Value: !GetAtt ApiService.Name
+  WorkerServiceName:
+    Value: !GetAtt WorkerService.Name
