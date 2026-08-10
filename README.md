@@ -1,386 +1,224 @@
-# Audience Intelligence Engine
+# Punk Audience Intelligence Engine
 
-A privacy-first audience intelligence service for Punk AI.
+[![Production CI](https://github.com/Vps2905/punk-audience-engine/actions/workflows/ci.yml/badge.svg?branch=audience-intelligence-agents)](https://github.com/Vps2905/punk-audience-engine/actions/workflows/ci.yml)
 
-The platform converts natural-language campaign requests into privacy-safe audience cohorts, ranked lookalikes, synthetic cohort-level seeds, and approval-gated export packages using direct Gemini intent understanding, LangGraph orchestration, Postgres-derived signals, embeddings, clustering, and strict export controls.
+A privacy-first audience intelligence and bounded-agent orchestration service for
+turning campaign goals into reviewable, aggregated audience recommendations.
 
----
+> **Current maturity:** engineering-complete for historical/local shadow
+> evaluation and ready for controlled staging review. Live provider ingestion,
+> activation connectors, and production cutover are disabled by default and are
+> not yet certified.
 
-## Overview
+## What the engine does
 
-Audience Intelligence Engine helps campaign teams move from a business request such as:
+The engine accepts a business request such as:
 
-> Build a high-quality evening restaurant audience in Montreal.
+> Build a high-quality evening restaurant audience for Montreal using the latest
+> available privacy-safe data.
 
-to a structured, privacy-safe audience plan that preserves the user’s requested:
+It then coordinates privacy controls, semantic retrieval, cohort intelligence,
+evolution review, and governance to produce an evidence-backed recommendation.
+Unsafe identifier requests and attempts to bypass approval are rejected before
+source access or audience processing.
 
-- location
-- business category
-- daypart
-- quality requirement
-- approval requirement
-- privacy constraints
+The system is designed to:
 
-The engine does not expose individual user records. It works with aggregated cohort-level data and blocks export whenever privacy, data freshness, or approval conditions are not satisfied.
+- ingest governed CSV, API, S3, and PostgreSQL-derived signals;
+- hash or remove identifiers at the privacy boundary;
+- enforce aggregation, k-anonymity, differential privacy, and lineage;
+- build and retrieve pinned semantic features in PostgreSQL/pgvector;
+- create, score, deduplicate, and review cohorts and lookalikes;
+- compare governed evolution proposals without autonomous live mutation;
+- coordinate the five modules through a bounded, authorization-aware agent layer;
+- keep activation and delivery behind freshness, privacy, authorization, and
+  manual-approval gates.
 
----
+## Safety invariants
 
-## Key Capabilities
+These are product boundaries, not optional prompt instructions:
 
-- Natural-language campaign understanding with direct Google Gemini
-- Deterministic fallback when the primary model is unavailable
-- LangGraph-based multi-step orchestration
-- Postgres-derived audience signal ingestion
-- Privacy-safe cohort generation
-- K-anonymity and differential privacy controls
-- Embedding-based audience ranking
-- Cohort clustering and quality scoring
-- Lookalike audience generation
-- Synthetic cohort-level seed generation
-- Approval-gated export manifests
-- Source freshness validation
-- Fail-closed privacy and export behavior
-- Docker-based production deployment
-- API-key protected endpoints
+- raw MAIDs, device IDs, email addresses, phone numbers, observations, and exact
+  latitude/longitude are not returned by audience workflows;
+- hashed individual identifiers are not treated as safe aggregate output;
+- tenant identity is authenticated and propagated across API, job, and history
+  boundaries;
+- terminal privacy and approval-bypass decisions stop downstream execution;
+- stale data, insufficient cohort size, missing approval, or failed authorization
+  blocks activation;
+- production-effect flags default to disabled;
+- historical and synthetic evaluation never implies live-delivery certification.
 
----
+The default production k-anonymity threshold is `k_min = 1000`. Privacy and
+delivery rules are documented in the
+[privacy safety policy](docs/privacy_safety_policy.md).
 
-## How It Works
-
-```text
-Business prompt
-    ↓
-Gemini intent understanding
-    ↓
-Constraint extraction
-    ↓
-LangGraph orchestration
-    ↓
-Privacy-safe Postgres source
-    ↓
-Cohort generation
-    ↓
-Embedding and ranking
-    ↓
-Quality filtering
-    ↓
-Synthetic cohort generation
-    ↓
-Lookalike generation
-    ↓
-Approval-gated export
-```
-
----
-
-## Architecture
+## Five-module architecture
 
 ```mermaid
-graph TD
-    Prompt[Business Prompt] --> Router[Gemini Model Router]
-    Router --> Intent[Intent and Constraint Extraction]
-    Intent --> Supervisor[LangGraph Supervisor]
-
-    Supervisor --> Privacy[Privacy Layer]
-    Privacy --> Postgres[(Postgres Safe-Derived Data)]
-    Privacy --> Cohorts[Privacy-Safe Cohorts]
-
-    Cohorts --> Embeddings[Embedding Pipeline]
-    Embeddings --> Ranking[Audience Ranking]
-    Ranking --> Quality[Quality Policy]
-
-    Quality --> Synthetic[Synthetic Cohort Generation]
-    Quality --> Management[Cohort Management]
-
-    Management --> Lookalikes[Lookalike Audiences]
-    Synthetic --> Export[Safe Export]
-    Lookalikes --> Export
-
-    Export --> Approval[Approval and Freshness Gate]
+flowchart TD
+    M1["1. Ingestion & privacy"] --> M2["2. Embeddings & retrieval"]
+    M2 --> M3["3. Cohort intelligence"]
+    M3 --> M4["4. Evolution review"]
+    M4 --> M5["5. Bounded orchestration"]
+    M5 --> G["Freshness + privacy + approval gate"]
+    G -->|approved and certified| D["Aggregated delivery package"]
+    G -->|otherwise| B["Blocked with evidence"]
 ```
 
----
+| Module | Responsibility | Implemented controls |
+| --- | --- | --- |
+| 1. Ingestion & privacy | Govern provider deliveries and derive privacy-safe features | hashing/removal, aggregation, k-anonymity, DP accounting, lineage, idempotency, retry, quarantine, DLQ, reconciliation |
+| 2. Embeddings & retrieval | Build searchable behavioral/contextual representations | immutable model artifacts, model registry, 384-dimensional vectors, pgvector, hybrid retrieval, multilingual benchmark gates |
+| 3. Cohort intelligence | Create and assess aggregated audiences | rule and vector candidates, clustering, quality scoring, overlap/deduplication, governed lookalikes, lifecycle and shadow review |
+| 4. Evolution control | Measure changes without uncontrolled mutation | immutable snapshots, drift evidence, recommendations, approval shadow, recovery and rollback controls |
+| 5. Agent orchestration | Plan and coordinate work across the other modules | goal decomposition, capability authorization, bounded execution, terminal safety, dual-run comparison, repeated shadow evidence, scale/latency/recovery gates |
 
-## Core Components
+Cross-cutting services add tenant isolation, aggregate quality monitoring,
+observability/SLO governance, security hardening, preproduction certification,
+AWS Infrastructure as Code, and CI supply-chain checks.
 
-### Privacy Layer
+## Bounded autonomy model
 
-- Loads privacy-safe source data
-- Applies aggregation and k-anonymity
-- Blocks unsafe columns
-- Prevents individual-level data from entering the export flow
-- Produces cohort-level records only
+Module 5 is an agentic control plane, but it is intentionally not an unrestricted
+autonomous actor. It can interpret goals, select authorized capabilities, execute
+read-only or shadow functions, compare results, recover from bounded failures,
+and produce certification evidence. It cannot grant itself privileges, override
+terminal safety decisions, enable production effects, or approve delivery.
 
-### Synthetic Data Generation
-
-- Produces privacy-safe synthetic cohort variants
-- Uses differential-privacy-aware generation
-- Enforces production privacy thresholds
-- Fails closed when input cohorts are unsafe
-
-### Embedding Pipeline
-
-- Converts cohort traits into vector representations
-- Supports semantic ranking and similarity search
-- Uses a configurable embedding backend
-- Uses Postgres-backed vector storage in the validated Docker configuration
-
-### Cohort Management
-
-- Clusters related audience cohorts
-- Scores audience quality
-- Generates lookalike relationships
-- Produces export-ready candidates
-
-### Safe Export
-
-- Creates approval-gated export manifests
-- Blocks downstream delivery when approval is missing
-- Blocks stale-source exports
-- Prevents raw identifiers and personal data from being exported
-
-### Orchestration
-
-- Coordinates the end-to-end workflow
-- Preserves requested business constraints
-- Verifies intermediate decisions
-- Repairs incomplete plans
-- Prevents downstream stages from overriding terminal safety decisions
-
----
-
-## Privacy by Design
-
-The export workflow is designed to keep the following values false:
+The governed state transition is:
 
 ```text
-Raw MAIDs exported: False
-Hashed identifiers exported: False
-Raw observations exported: False
-Raw latitude/longitude exported: False
-Email exported: False
-Phone exported: False
-Individual user data exported: False
+goal -> plan -> authorize -> execute/shadow -> compare -> review -> approve or block
 ```
 
-Production synthetic generation enforces:
+See the [bounded autonomy design](docs/module5_6_bounded_autonomous_orchestration.md)
+and [operator evidence chain](docs/module5_operator_evidence_chain.md).
 
-```text
-k_min = 1000
-```
+## Current readiness
 
-The system blocks export when:
+| Area | Status |
+| --- | --- |
+| Application implementation | Five modules and cross-cutting control planes implemented |
+| Automated verification | `1206 passed, 3 skipped` at commit `76191cec12c2e0a5a92c2a20720415e9dfb6e1df` |
+| Historical evaluation | Supported with privacy-safe, read-only/shadow evidence |
+| Terminal safety | Identifier extraction and approval-bypass attempts fail before source access |
+| Module 5 evidence | Repeated shadow, functional shadow, authorization, and scale/recovery harnesses implemented |
+| CI and supply chain | Tests, dependency/source/IaC checks, container smoke, critical vulnerability gate, SBOM, and signing workflow |
+| Infrastructure | Deployment-oriented AWS CloudFormation and preproduction runbooks implemented |
+| Real staging deployment | Requires deployment and verification in an actual staging account |
+| Fresh provider certification | Pending representative fresh vendor deliveries and operational reconciliation evidence |
+| Activation connector certification | Pending approved aggregate/synthetic sandbox certification |
+| Live production | Not authorized; production routing and delivery remain disabled |
 
-- the request asks for raw personal identifiers
-- the requested audience has no safe match
-- source data is stale
-- required approval is missing
-- privacy thresholds are not satisfied
-- required constraints are incomplete
+Passing tests demonstrate implementation quality; they do not replace staging,
+security/privacy review, fresh-data validation, load/soak testing, disaster
+recovery exercises, or connector certification.
 
----
+## Technology
 
-## Technology Stack
+- Python 3.11 and FastAPI
+- LangGraph-based orchestration
+- PostgreSQL and pgvector
+- sentence-transformers with pinned model revisions and offline artifacts
+- SDV and privacy-safe aggregate synthesis
+- pandas and scikit-learn
+- Docker and Docker Compose
+- AWS CloudFormation
+- pytest, Bandit, pip-audit, cfn-lint, Trivy, Syft, and Cosign
 
-- Python
-- FastAPI
-- LangGraph
-- Google Gemini
-- PostgreSQL
-- Redis
-- Pandas
-- SDV
-- Scikit-learn
-- Docker
-- Docker Compose
-- Pytest
+The language-model router is optional. Authoritative privacy, authorization,
+freshness, and approval decisions remain deterministic service controls.
 
-Validated Docker backends:
-
-```text
-Embedding backend: sklearn_hashing
-Vector backend: postgres_array
-Run history: PostgreSQL
-Synthetic engine: DPAggregateCohortSynthesizer
-```
-
----
-
-## Getting Started
+## Quick start for local evaluation
 
 ### Prerequisites
 
-- Python 3.11 or later
-- PostgreSQL
-- Docker and Docker Compose
-- A Gemini API key
-- Project environment variables
+- Git
+- Python `3.11.x`
+- [`uv`](https://docs.astral.sh/uv/) `0.11.33`
+- PostgreSQL for database-backed flows
+- Docker with Compose for container and pgvector workflows
 
 ### Install
 
 ```bash
-git clone https://github.com/Vps2905/punk-audience-engine.git
+git clone --branch audience-intelligence-agents --single-branch \
+  https://github.com/Vps2905/punk-audience-engine.git
 cd punk-audience-engine
 
-python3 -m venv .venv
-source .venv/bin/activate
-
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
-```
-
----
-
-## Environment Configuration
-
-Create the local environment file:
-
-```bash
+uv sync --frozen --python 3.11
 cp .env.example .env
 ```
 
-Configure the required values:
+Configure `.env` with locally generated secrets and the databases required for
+the flow you intend to test. Never commit `.env`, credentials, provider data, or
+runtime evidence. The application validates environment safety and fails closed
+when production requirements are incomplete.
 
-```env
-APP_ENV=development
-PRODUCTION_MODE=false
-
-ENABLE_LLM_INTENT=true
-LLM_INTENT_PROVIDER=gemini
-LLM_INTENT_MODEL=gemini-3.5-flash-lite
-LLM_INTENT_MODEL_CHAIN=
-
-GEMINI_API_KEY=<YOUR_GEMINI_API_KEY>
-GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
-```
-
-Do not commit `.env` or any real credentials.
-
-Confirm the file is ignored:
+### Prefetch the pinned semantic model
 
 ```bash
-git check-ignore -v .env
+MODEL_CACHE="$HOME/.cache/punk-audience-semantic-model"
+
+HF_HUB_OFFLINE=0 \
+TRANSFORMERS_OFFLINE=0 \
+LOCAL_SEMANTIC_MODEL_CACHE="$MODEL_CACHE" \
+PYTHONPATH=. \
+uv run --frozen python scripts/prefetch_local_semantic_model.py \
+  --cache-dir "$MODEL_CACHE"
 ```
 
----
+The prefetch command verifies the configured model revision and materializes an
+offline artifact. CI and container builds use the same pinned-artifact policy.
 
-## Run Locally
+### Start the local workspace
 
 ```bash
-source .venv/bin/activate
+MODEL_CACHE="$HOME/.cache/punk-audience-semantic-model"
 
 AUDIENCE_LOCAL_UI_ENABLED=true \
+AUDIENCE_LOCAL_UI_TENANT_ID=punk_internal \
 PRODUCTION_MODE=false \
 APP_ENV=local \
-PYTHONPATH=. python -m uvicorn app.main:app \
+REQUIRE_AUDIENCE_API_KEY=true \
+SYNTHETIC_ENGINE=dp_aggregate \
+ALLOW_SYNTHETIC_FALLBACK=false \
+K_ANONYMITY_MIN=1000 \
+HF_HUB_OFFLINE=1 \
+TRANSFORMERS_OFFLINE=1 \
+LOCAL_SEMANTIC_MODEL_CACHE="$MODEL_CACHE" \
+PYTHONPATH=. \
+uv run --frozen uvicorn app.main:app \
   --host 127.0.0.1 \
-  --port 8000 \
-  --reload
+  --port 8000
 ```
 
-Health endpoint:
+Open <http://127.0.0.1:8000/audience-workspace>. The local workspace keeps
+credentials on the server and uses an HttpOnly loopback session. It is disabled
+in production mode.
+
+Health endpoints:
 
 ```bash
-curl -fsS http://127.0.0.1:8000/health
+curl --fail http://127.0.0.1:8000/health
+curl --fail http://127.0.0.1:8000/ready
 ```
 
-Prompt UI:
+## API example
 
-```text
-http://127.0.0.1:8000/audience-workspace
-```
-
-The workspace is intentionally available only on loopback in a
-non-production environment. It sends only the prompt from the browser;
-database configuration, tenant identity, privacy thresholds, and approval
-controls remain server-side.
-
----
-
-## Run with Docker
-
-### Build
+Authenticated service endpoints accept either `X-Audience-API-Key` or a bearer
+token as defined by the
+[integration contract](docs/audience_intelligence_integration_contract.md).
 
 ```bash
-docker compose build audience-engine
-```
-
-### Start
-
-```bash
-docker compose up -d audience-engine
-```
-
-### Rebuild after code changes
-
-```bash
-docker compose build audience-engine
-
-docker compose up -d \
-  --force-recreate \
-  audience-engine
-```
-
-### Check health
-
-```bash
-docker ps --filter name=punk-audience-engine
-
-curl -fsS http://127.0.0.1:8000/health
-```
-
-Expected response:
-
-```json
-{
-  "status": "ok",
-  "service": "Audience Intelligence Engine"
-}
-```
-
-### View logs
-
-```bash
-docker logs --tail 200 punk-audience-engine
-```
-
----
-
-## API Authentication
-
-Production endpoints require an audience API key.
-
-```bash
-export AUDIENCE_API_KEY="<YOUR_AUDIENCE_API_KEY>"
-```
-
-Example header:
-
-```text
-X-Audience-API-Key: <YOUR_AUDIENCE_API_KEY>
-```
-
----
-
-## API Examples
-
-### Swarm Health
-
-```bash
-curl -sS \
-  http://localhost:8000/api/audience-intelligence/swarm/health \
-  -H "X-Audience-API-Key: $AUDIENCE_API_KEY"
-```
-
-### Run an Audience Request
-
-```bash
-curl -sS -X POST \
-  http://localhost:8000/api/audience-intelligence/prompt/run \
-  -H "Content-Type: application/json" \
+curl --fail-with-body \
   -H "X-Audience-API-Key: $AUDIENCE_API_KEY" \
-  -d '{
-    "prompt": "Build a high-quality evening restaurant audience in Montreal",
+  -H "Content-Type: application/json" \
+  -X POST \
+  http://127.0.0.1:8000/api/audience-intelligence/prompt/run \
+  --data '{
+    "prompt": "Build a high-quality evening restaurant audience for Montreal using privacy-safe data. Keep activation blocked pending review.",
     "source": "postgres",
     "approval_required": true,
     "postgres_limit": 10000,
@@ -392,161 +230,96 @@ curl -sS -X POST \
   }'
 ```
 
----
-
-## Example Campaign Request
-
-```text
-We are launching a premium dinner campaign for our restaurant in Montreal.
-Build a high-quality, privacy-safe audience of people who visit restaurants
-during the evening. Preserve the Montreal location, restaurant category,
-evening timing, and quality requirement. Prepare only approval-gated export
-candidates without exposing individual user data.
-```
-
-Expected interpretation:
-
-```text
-Location: Montreal
-Category: restaurant
-Daypart: evening
-Quality: high
-Approval required: true
-Privacy-safe output only: true
-```
-
-Expected safety behavior:
-
-```text
-Approval status: blocked until all gates pass
-Downstream export enabled: False
-```
-
----
+The response includes run status, source/freshness evidence, selected cohorts,
+privacy guarantees, approval status, and whether downstream export is enabled.
 
 ## Testing
 
-Run the complete test suite:
+Compile and run the complete locked test suite:
 
 ```bash
-source .venv/bin/activate
-PYTHONPATH=. pytest -q
+python -m compileall -q app scripts tests
+
+REQUIRE_AUDIENCE_API_KEY=true \
+HF_HUB_OFFLINE=1 \
+TRANSFORMERS_OFFLINE=1 \
+LOCAL_SEMANTIC_MODEL_CACHE="$HOME/.cache/punk-audience-semantic-model" \
+PYTHONPATH=. \
+uv run --frozen python -m pytest -q
 ```
 
-Latest validated result:
+Validate migration ordering separately when adding a migration:
+
+```bash
+PYTHONPATH=. uv run --frozen python -m pytest -q \
+  tests/test_migration_version_uniqueness.py
+```
+
+The GitHub workflow also exercises PostgreSQL integration, dependency and source
+security gates, CloudFormation linting, an immutable container smoke test,
+critical vulnerability scanning, SBOM generation, and keyless signing.
+
+## Docker and deployment
+
+The root `Dockerfile` is an immutable, non-root runtime image with a pinned
+semantic model artifact. `docker-compose.yml` is deployment-oriented: it expects
+real production secrets, TLS database connectivity, and explicit configuration.
+It is not a substitute for a staging account.
+
+Before any live rollout, complete the
+[preproduction deployment certification runbook](docs/preproduction_deployment_certification_runbook.md)
+and verify fresh-provider delivery, migrations, IAM, secrets, networking,
+observability, backup/restore, failover, and activation connectors in their real
+target environments.
+
+## Repository layout
 
 ```text
-450 passed, 3 skipped
+app/             FastAPI routes, contracts, agents, and production services
+docs/            Architecture, change manifests, policies, and operator runbooks
+infrastructure/  AWS CloudFormation and deployment assets
+migrations/      Ordered PostgreSQL migrations (0001-0033)
+samples/         Safe examples and reviewed contract samples
+scripts/         Migration, benchmark, evidence, and certification CLIs
+tests/           Unit, integration, security, migration, and production gates
+.github/         CI and dependency update automation
 ```
 
-Run Gemini and semantic intent tests:
+Runtime data and operator evidence belong outside version control.
 
-```bash
-PYTHONPATH=. pytest -q \
-  tests/test_llm_model_router_response_handling.py \
-  tests/test_dynamic_natural_language_acceptance.py \
-  tests/test_semantic_intent_live_flow_regressions.py
-```
+## Documentation map
 
-Check formatting:
-
-```bash
-git diff --check
-```
-
----
-
-## Direct Gemini Verification
-
-```bash
-source .venv/bin/activate
-
-PYTHONPATH=. python - <<'PY'
-from app.agents.audience_intelligence_orchestrator_agent import (
-    AudienceIntelligenceOrchestratorAgent,
-)
-
-result = AudienceIntelligenceOrchestratorAgent().run(
-    prompt=(
-        "Build a high-quality evening restaurant audience "
-        "in Montreal for a premium dinner campaign."
-    )
-)
-
-intent = (
-    (result.get("v2_autonomous") or {})
-    .get("prompt_intent")
-    or {}
-)
-
-print("llm_used:", intent.get("llm_used"))
-print("llm_provider:", intent.get("llm_provider"))
-print("llm_model:", intent.get("llm_model"))
-print("llm_fallback_used:", intent.get("llm_fallback_used"))
-print("llm_error:", intent.get("llm_error"))
-print("resolver_mode:", intent.get("resolver_mode"))
-PY
-```
-
-Expected:
-
-```text
-llm_used: True
-llm_provider: gemini
-llm_model: gemini-3.5-flash-lite
-llm_fallback_used: False
-llm_error: None
-resolver_mode: llm_rag_primary
-```
-
----
-
-## Current Project Status
-
-The core Audience Intelligence workflow is operational and validated for controlled pre-production use.
-
-Verified:
-
-- direct Gemini integration
-- LangGraph orchestration
-- privacy-safe Postgres ingestion
-- audience ranking
-- synthetic cohort generation
-- lookalike generation
-- Docker deployment
-- API health
-- approval-gated export
-- automated test coverage
-
-Remaining production work:
-
-- refresh and continuously validate production source data
-- complete external ad-platform delivery integration
-- validate retry and idempotency behavior
-- validate multi-worker scaling and database-pool behavior
-- add production monitoring, tracing, and alerting
-- complete persistent checkpoint recovery testing
-- benchmark production retrieval quality
-
----
-
-## Documentation
+Start with:
 
 - [Architecture](docs/audience_intelligence_architecture.md)
-- [Integration Contract](docs/audience_intelligence_integration_contract.md)
-- [Runbook](docs/audience_intelligence_runbook.md)
-- [Privacy and Safety Policy](docs/privacy_safety_policy.md)
-- [Pre-production Review Notes](docs/preproduction_review_notes.md)
+- [Integration contract](docs/audience_intelligence_integration_contract.md)
+- [Operations runbook](docs/audience_intelligence_runbook.md)
+- [Privacy safety policy](docs/privacy_safety_policy.md)
+- [Authenticated tenant boundary](docs/authenticated_tenant_api_boundary_runbook.md)
 
----
+Module and production readiness references:
 
-## Security
+- [Module 1 provider control plane](docs/module1_provider_control_plane_runbook.md)
+- [Module 2 completion runbook](docs/module2_full_completion_runbook.md)
+- [Module 3 cohort candidates](docs/module3_1_2_governed_cohort_candidates.md)
+- [Module 4 evolution snapshots](docs/module4_1_governed_evolution_snapshots.md)
+- [Module 5 governed coordination](docs/module5_governed_agent_coordination.md)
+- [Module 5 functional shadow](docs/module5_9_functional_shadow_execution.md)
+- [Module 5 security authorization](docs/module5_10_agent_security_authorization.md)
+- [Module 5 scale and recovery](docs/module5_11_scale_latency_recovery_certification.md)
+- [CI and supply-chain runbook](docs/production_ci_supply_chain_runbook.md)
+- [Security hardening](docs/production_security_hardening.md)
+- [Observability and SLO governance](docs/production_observability_slo_governance.md)
+- [Infrastructure as Code](docs/production_infrastructure_as_code_runbook.md)
 
-Do not report security vulnerabilities in public issues.
+## Contributing and security
 
-Share security findings privately with the project maintainers and include:
+See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change. Security and
+privacy findings should follow [SECURITY.md](SECURITY.md) and must not be posted
+with real credentials, identifiers, or provider records.
 
-- affected component
-- reproduction steps
-- observed impact
-- recommended mitigation
+## License
+
+No public license has been declared for this repository. Unless and until the
+repository owner adds one, the source remains under the owner's default
+copyright rights.
