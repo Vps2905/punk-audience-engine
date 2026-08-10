@@ -4,6 +4,10 @@ import os
 
 from fastapi import HTTPException, status
 
+from app.core.certification_evaluation_context import (
+    certification_evaluation_active,
+)
+
 
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -24,6 +28,9 @@ def local_file_storage_allowed() -> bool:
     Local file storage is acceptable for local/dev/test,
     but blocked in production unless explicitly enabled.
     """
+    if certification_evaluation_active():
+        return False
+
     if not is_production_mode():
         return True
 

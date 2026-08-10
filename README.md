@@ -269,8 +269,11 @@ git check-ignore -v .env
 ```bash
 source .venv/bin/activate
 
+AUDIENCE_LOCAL_UI_ENABLED=true \
+PRODUCTION_MODE=false \
+APP_ENV=local \
 PYTHONPATH=. python -m uvicorn app.main:app \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 8000 \
   --reload
 ```
@@ -284,8 +287,13 @@ curl -fsS http://127.0.0.1:8000/health
 Prompt UI:
 
 ```text
-http://127.0.0.1:8000/api/audience-intelligence/prompt/ui
+http://127.0.0.1:8000/audience-workspace
 ```
+
+The workspace is intentionally available only on loopback in a
+non-production environment. It sends only the prompt from the browser;
+database configuration, tenant identity, privacy thresholds, and approval
+controls remain server-side.
 
 ---
 

@@ -353,6 +353,7 @@ def _collect_job_approval_blockers(
         "broad_location_no_export",
         "privacy_identifier_request_blocked",
         "export_action_requires_existing_audience",
+        "approval_bypass_attempt_blocked",
     }
 
     filter_mode = _job_norm(prompt_filter_report.get("filter_mode"))

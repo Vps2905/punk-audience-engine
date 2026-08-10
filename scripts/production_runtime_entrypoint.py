@@ -46,13 +46,15 @@ def configured_environment(
     mode: str,
     environment: Mapping[str, str],
 ) -> dict[str, str]:
-    if mode not in {"api", "worker"}:
-        raise RuntimeError("Runtime mode must be api or worker.")
+    if mode not in {"api", "worker", "migration"}:
+        raise RuntimeError("Runtime mode must be api, worker, or migration.")
     result = dict(environment)
     database_url = build_database_url(environment)
-    target = "ECHO_DATABASE_URL" if mode == "api" else (
-        "PROVIDER_INGESTION_DATABASE_URL"
-    )
+    target = {
+        "api": "ECHO_DATABASE_URL",
+        "worker": "PROVIDER_INGESTION_DATABASE_URL",
+        "migration": "DATABASE_URL",
+    }[mode]
     result[target] = database_url
     result.pop("DATABASE_USER", None)
     result.pop("DATABASE_PASSWORD", None)
@@ -61,14 +63,25 @@ def configured_environment(
 
 def main() -> None:
     if len(sys.argv) != 2:
-        raise SystemExit("usage: production_runtime_entrypoint.py <api|worker>")
+        raise SystemExit(
+            "usage: production_runtime_entrypoint.py <api|worker|migration>"
+        )
     mode = sys.argv[1]
     environment = configured_environment(mode, os.environ)
-    command = (
-        ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-        if mode == "api"
-        else ["python", "scripts/run_provider_ingestion_worker.py"]
-    )
+    command = {
+        "api": [
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+        ],
+        "worker": ["python", "scripts/run_provider_ingestion_worker.py"],
+        "migration": ["python", "scripts/bootstrap_preproduction_database.py"],
+    }.get(mode)
+    if command is None:
+        raise RuntimeError("Runtime mode must be api, worker, or migration.")
     os.execvpe(command[0], command, environment)
 
 

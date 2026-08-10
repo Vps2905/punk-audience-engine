@@ -182,6 +182,76 @@ class EmbeddingFeatureStoreAgent:
 
         return manifest
 
+    def build_in_memory(
+        self,
+        cohorts: pd.DataFrame,
+        embedding_provider: str = "sklearn_tfidf",
+        run_id: Optional[str] = None,
+        max_features: int = 384,
+    ) -> tuple[Dict[str, Any], pd.DataFrame, np.ndarray]:
+        """Build the ordinary safe vectors without creating local artifacts."""
+        run_id = run_id or f"embedding_run_{uuid.uuid4().hex[:12]}"
+        self._validate_runtime_config(
+            embedding_provider=embedding_provider,
+            max_features=max_features,
+        )
+        self._validate_no_blocked_columns(
+            cohorts.columns,
+            context="embedding_raw_input",
+        )
+        self.validator.validate_no_secret_values(
+            cohorts,
+            context="embedding_raw_input",
+        )
+        safe_metadata = self._prepare_safe_metadata(cohorts)
+        self.validator.validate_safe_cohort_dataframe(
+            safe_metadata,
+            context="embedding_safe_metadata",
+        )
+        trait_texts = safe_metadata["trait_text"].astype(str).fillna("").tolist()
+        if embedding_provider != "sklearn_tfidf":
+            raise ValueError(
+                "In-memory evaluation currently requires sklearn_tfidf."
+            )
+        vectors, provider_details = self._build_sklearn_tfidf_vectors(
+            trait_texts=trait_texts,
+            max_features=max_features,
+        )
+        vectors = self._normalize_vectors(vectors)
+        self._validate_vectors(
+            vectors=vectors,
+            expected_rows=len(safe_metadata),
+        )
+        base_uri = (
+            "memory://audience_scale_evaluation/embedding"
+            f"?run_id={run_id}"
+        )
+        manifest = {
+            "module": "Embedding & Feature Store",
+            "status": "completed",
+            "run_id": run_id,
+            "embedding_provider": embedding_provider,
+            "provider_details": provider_details,
+            "storage_backend": "memory",
+            "input_rows": int(len(cohorts)),
+            "vector_count": int(vectors.shape[0]),
+            "vector_dimension": int(vectors.shape[1]),
+            "vectors_normalized": True,
+            "metadata_rows": int(len(safe_metadata)),
+            "raw_maids_exported": False,
+            "raw_observations_exported": False,
+            "raw_lat_lng_exported": False,
+            "raw_email_exported": False,
+            "raw_phone_exported": False,
+            "individual_user_data_exported": False,
+            "outputs": {
+                "cohort_vectors": base_uri + "&artifact=vectors",
+                "cohort_metadata": base_uri + "&artifact=metadata",
+                "embedding_manifest": base_uri + "&artifact=manifest",
+            },
+        }
+        return manifest, safe_metadata, vectors
+
     def search_similar(
         self,
         query_text: str,

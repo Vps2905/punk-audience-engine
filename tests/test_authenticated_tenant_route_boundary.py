@@ -4,6 +4,10 @@ from fastapi.testclient import TestClient
 from app.core.audience_request_context import (
     require_authenticated_audience_request,
 )
+from app.core.local_ui_session import (
+    require_local_ui_request,
+    require_local_ui_session,
+)
 from app.core.tenant_request_auth import tenant_signature
 from app.main import app
 
@@ -25,6 +29,12 @@ def test_every_business_api_route_has_shared_request_boundary():
         "/ready",
         "/ui/audience-agents",
         "/api/audience-intelligence/prompt/ui",
+        "/audience-workspace",
+    }
+    accepted_boundaries = {
+        require_authenticated_audience_request,
+        require_local_ui_request,
+        require_local_ui_session,
     }
     unprotected = []
 
@@ -35,7 +45,7 @@ def test_every_business_api_route_has_shared_request_boundary():
             dependency.call
             for dependency in route.dependant.dependencies
         }
-        if require_authenticated_audience_request not in dependency_calls:
+        if not accepted_boundaries.intersection(dependency_calls):
             unprotected.append(route.path)
 
     assert unprotected == []

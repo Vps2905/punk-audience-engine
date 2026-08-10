@@ -10,6 +10,9 @@ from app.services.production_infrastructure_governance_service import (
     ProductionInfrastructureAssessmentService,
     ProductionInfrastructureChangeSetReviewService,
 )
+from app.services.production_preproduction_deployment_certification_service import (
+    ProductionPreproductionDeploymentCertificationService,
+)
 
 
 def _truthy(value: Any) -> bool:
@@ -47,11 +50,36 @@ class ProductionInfrastructureStatusService:
                 "infrastructure_controls_passed"
             ) is True
         )
+        deployment_path_key = "PREPRODUCTION_DEPLOYMENT_CERTIFICATION_PATH"
+        deployment_configured = bool(
+            str(self._environment.get(deployment_path_key) or "").strip()
+        )
+        deployment = self._validated(
+            deployment_path_key,
+            ProductionPreproductionDeploymentCertificationService().validate_report,
+        )
+        deployment_valid = bool(
+            review_valid
+            and deployment
+            and deployment.get("preproduction_deployment_certified") is True
+            and deployment.get("request", {}).get("tenant_id")
+            == assessment.get("request", {}).get("tenant_id")
+            and deployment.get("request", {}).get(
+                "infrastructure_review_fingerprint"
+            )
+            == review.get("infrastructure_review_fingerprint")
+        )
         validation_enabled = self._flag("INFRASTRUCTURE_VALIDATION_ENABLED")
         apply_enabled = self._flag("INFRASTRUCTURE_APPLY_ENABLED")
         traffic_enabled = self._flag("INFRASTRUCTURE_PRODUCTION_TRAFFIC_ENABLED")
         if apply_enabled or traffic_enabled:
             readiness = "unsafe_configuration_infrastructure_mutation_blocked"
+        elif deployment_configured and not deployment_valid:
+            readiness = (
+                "preproduction_deployment_certification_failed_closed"
+            )
+        elif deployment_valid:
+            readiness = "preproduction_deployment_certified"
         elif validation_enabled and not assessment_valid:
             readiness = "unsafe_configuration_infrastructure_evidence_missing"
         elif assessment_valid and not review_valid:
@@ -67,11 +95,18 @@ class ProductionInfrastructureStatusService:
                 "runtime_plane_assessment": assessment_valid,
                 "manual_change_set_review": review_valid,
             },
+            "certification_components": {
+                "measured_preproduction_deployment": deployment_valid,
+            },
             "infrastructure_engineering_evidence_ready": review_valid,
+            "preproduction_deployment_certified": deployment_valid,
             "live_production_certified": False,
             "evidence_presence": {
                 "infrastructure_assessment": assessment is not None,
                 "infrastructure_review": review is not None,
+                "preproduction_deployment_certification": (
+                    deployment is not None
+                ),
             },
             "feature_flags": {
                 "validation_enabled": validation_enabled,

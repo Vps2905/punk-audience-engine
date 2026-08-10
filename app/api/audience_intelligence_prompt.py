@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import html
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from app.agents.audience_intelligence_orchestrator_agent import AudienceIntelligenceOrchestratorAgent
@@ -17,6 +16,7 @@ from app.core.audience_request_context import (
     AudienceRequestContext,
     require_authenticated_audience_request,
 )
+from app.core.local_ui_session import require_local_ui_session
 from app.core.production_guardrails import local_file_storage_allowed
 
 router = APIRouter(
@@ -48,6 +48,17 @@ class AudiencePromptRequest(BaseModel):
     approval_required: bool = True
 
 
+class LocalAudiencePromptRequest(BaseModel):
+    """Browser-safe request contract for the local workspace."""
+
+    prompt: str = Field(..., min_length=3, max_length=4000)
+
+
+def _business_label(value: Any) -> str:
+    normalized = str(value or "not available").replace("_", " ")
+    return normalized[:1].upper() + normalized[1:]
+
+
 def _build_business_summary(result: Dict[str, Any]) -> str:
     lines = []
 
@@ -59,12 +70,92 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     lines.append("## Summary")
     lines.append("")
     lines.append(f"Source mode: {result.get('source_mode')}")
-    source_rows_checked = (
-        result.get("source_rows")
-        or ((result.get("v2_autonomous") or {}).get("data_freshness") or {}).get("source_rows_checked")
-        or "unknown"
+    terminal_policy_decision = bool(
+        result.get("terminal_policy_decision")
     )
+    source_rows_checked = result.get("source_rows")
+    if source_rows_checked is None and not terminal_policy_decision:
+        source_rows_checked = (
+            (
+                (result.get("v2_autonomous") or {}).get(
+                    "data_freshness"
+                )
+                or {}
+            ).get("source_rows_checked")
+        )
+    if source_rows_checked is None:
+        source_rows_checked = (
+            "not evaluated"
+            if terminal_policy_decision
+            else "unknown"
+        )
     lines.append(f"Source rows checked: {source_rows_checked}")
+    if terminal_policy_decision:
+        safe_export = result.get("safe_export", {}) or {}
+        approval_status = str(
+            result.get("approval_status")
+            or safe_export.get("approval_status")
+            or "blocked"
+        )
+        lines.append(
+            "Decision: " + _business_label(approval_status)
+        )
+        lines.append("Downstream export enabled: False")
+        lines.append("")
+        lines.append("## Safety decision")
+        lines.append("")
+        if approval_status == "blocked_privacy_identifier_request":
+            lines.append(
+                "Raw MAIDs, device IDs, and individual-level user data "
+                "cannot be provided or exported. Only privacy-safe "
+                "aggregated cohorts are allowed."
+            )
+            lines.append(
+                "No audience ranking, preparation, or export was "
+                "attempted. No activation was performed."
+            )
+        elif approval_status == "blocked_approval_bypass_attempt":
+            lines.append(
+                "Safety, freshness, governance, and manual approval "
+                "controls cannot be bypassed."
+            )
+            lines.append(
+                "The request was stopped before source access, ranking, "
+                "audience preparation, activation, or export."
+            )
+        else:
+            lines.append(
+                "An export action requires an existing selected "
+                "run/audience and manual approval through the "
+                "authenticated approval workflow."
+            )
+            lines.append(
+                "No new audience ranking, preparation, or export was "
+                "attempted. No activation was performed."
+            )
+        lines.append("")
+        lines.append("## Execution")
+        lines.append("")
+        lines.append("- Source data access: not evaluated")
+        lines.append("- Semantic retrieval: skipped")
+        lines.append("- Cohort intelligence: skipped")
+        lines.append("- Evolution review: skipped")
+        lines.append("- Downstream activation/export: blocked")
+        warnings = result.get("coverage_warnings", []) or []
+        if warnings:
+            lines.append("")
+            lines.append("## Review note")
+            lines.append("")
+            for warning in warnings:
+                lines.append(f"- {warning}")
+        lines.append("")
+        lines.append("## Privacy and delivery")
+        lines.append("")
+        lines.append("Raw or hashed identifiers returned: False")
+        lines.append("Individual-level data returned: False")
+        lines.append("Audience activated or exported: False")
+        return "\n".join(lines)
+
     lines.append(f"Prompt-selected cohorts: {result.get('prompt_selected_cohorts')}")
     safe_export = result.get("safe_export", {}) or {}
     audience_count = int(
@@ -143,6 +234,7 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
     terminal_safety_modes = {
         "privacy_identifier_request_blocked",
         "export_action_requires_existing_audience",
+        "approval_bypass_attempt_blocked",
     }
     if filter_mode_for_safety == "privacy_identifier_request_blocked":
         lines.append("## Safety decision")
@@ -158,6 +250,15 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
         lines.append(
             "This was an export-action-only request. The system will not create or export a new audience "
             "without an existing selected run/audience and manual approval."
+        )
+        lines.append("")
+    elif filter_mode_for_safety == "approval_bypass_attempt_blocked":
+        lines.append("## Safety decision")
+        lines.append("")
+        lines.append(
+            "Safety, freshness, governance, and manual approval controls "
+            "cannot be bypassed. No source data was read and no audience "
+            "was ranked, prepared, activated, or exported."
         )
         lines.append("")
 
@@ -186,7 +287,16 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
 
     v2 = result.get("v2_autonomous", {}) or {}
     v2_review = result.get("v2_swarm_review", {}) or {}
-    if v2:
+    if v2 and terminal_policy_decision:
+        lines.append("## Autonomous Audience Intelligence v2")
+        lines.append("")
+        lines.append("Status: skipped")
+        lines.append(
+            "Retrieval, ranking, mutation, and evolution were not evaluated "
+            "because the request was stopped by the terminal safety policy."
+        )
+        lines.append("")
+    elif v2:
         lines.append("## Autonomous Audience Intelligence v2")
         lines.append("")
         lines.append(f"Status: {v2.get('status')}")
@@ -295,6 +405,12 @@ def _build_business_summary(result: Dict[str, Any]) -> str:
             "The export action was blocked because no existing approved "
             "audience was supplied. No new audience ranking, preparation, "
             "or export was attempted."
+        )
+    elif approval_status == "blocked_approval_bypass_attempt":
+        lines.append(
+            "The request attempted to bypass authoritative safety or "
+            "approval controls. It was stopped before source access, "
+            "ranking, audience preparation, activation, or export."
         )
     elif approval_status == "blocked_no_safe_exact_match":
         lines.append(
@@ -406,7 +522,15 @@ def _build_prompt_api_response(
         "status": result.get("status"),
         "run_id": result.get("run_id"),
         "source_mode": result.get("source_mode"),
-        "source_rows": result.get("source_rows") or v2_freshness.get("source_rows_checked"),
+        "source_rows": (
+            result.get("source_rows")
+            if result.get("source_rows") is not None
+            else (
+                None
+                if result.get("terminal_policy_decision")
+                else v2_freshness.get("source_rows_checked")
+            )
+        ),
         "freshness_status": freshness_status,
         "source_freshness": source_freshness or v2_freshness,
         "approval_status": approval_status,
@@ -426,6 +550,13 @@ def _build_prompt_api_response(
         "safe_export": safe_export_response,
         "privacy_guarantees": result.get("privacy_guarantees", {}),
         "run_history": result.get("run_history", {}),
+        "terminal_policy_decision": bool(
+            result.get("terminal_policy_decision")
+        ),
+        "policy_reason_code": result.get("policy_reason_code"),
+        "pipeline_stages": list(
+            result.get("pipeline_stages") or []
+        ),
     }
 
     if result.get("supervisor_decision"):
@@ -470,12 +601,9 @@ def _build_prompt_api_response(
     return response
 
 
-@router.post("/run")
-def run_audience_prompt(
+def _execute_audience_prompt(
     request: AudiencePromptRequest,
-    context: AudienceRequestContext = Depends(
-        require_authenticated_audience_request
-    ),
+    context: AudienceRequestContext,
 ) -> Dict[str, Any]:
     try:
         agent = _audience_execution_agent()
@@ -534,147 +662,45 @@ def run_audience_prompt(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.get("/ui", response_class=HTMLResponse)
-def audience_prompt_ui() -> str:
-    return """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Audience Intelligence Prompt Runner</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 32px; max-width: 1100px; }
-    textarea { width: 100%; height: 110px; font-size: 15px; }
-    button { padding: 12px 18px; font-size: 15px; cursor: pointer; }
-    pre { background: #111; color: #eee; padding: 16px; border-radius: 8px; white-space: pre-wrap; }
-    .row { margin: 14px 0; }
-    input, select { padding: 8px; font-size: 14px; width: 100%; }
-  </style>
-</head>
-<body>
-  <h1>Audience Intelligence Prompt Runner</h1>
+@router.post("/run")
+def run_audience_prompt(
+    request: AudiencePromptRequest,
+    context: AudienceRequestContext = Depends(
+        require_authenticated_audience_request
+    ),
+) -> Dict[str, Any]:
+    return _execute_audience_prompt(request, context)
 
-  <div class="row">
-    <label>Prompt</label>
-    <textarea id="prompt">Build me a high-quality restaurant evening audience for Montreal and San Francisco</textarea>
-  </div>
 
-  <div class="row">
-    <label>Source</label>
-    <select id="source">
-      <option value="postgres">postgres</option>
-      <option value="safe_artifact">safe_artifact</option>
-    </select>
-  </div>
+@router.post("/ui/run")
+def run_local_audience_prompt(
+    request: LocalAudiencePromptRequest,
+    context: AudienceRequestContext = Depends(
+        require_local_ui_session
+    ),
+) -> Dict[str, Any]:
+    operational_request = AudiencePromptRequest(
+        prompt=request.prompt,
+        source="postgres",
+        output_root="data/prompt_runs",
+        safe_cohort_path=None,
+        postgres_limit=10000,
+        k_min=1000,
+        epsilon=1.0,
+        synthetic_rows=1000,
+        max_export_cohorts=25,
+        min_export_quality=0.25,
+        approval_required=True,
+    )
+    return _execute_audience_prompt(
+        operational_request,
+        context,
+    )
 
-  <div class="row">
-    <label>Safe cohort path, only for safe_artifact mode</label>
-    <input id="safePath" value="data/modular_runs/postgres_privacy_to_synthetic/01_privacy/clean_feature_table.csv" />
-  </div>
 
-  <div class="row">
-    <label>Audience API Key</label>
-    <input id="apiKey" type="password" placeholder="Paste local API key from .env" />
-  </div>
-
-  <div class="row">
-    <label>Audience Tenant ID</label>
-    <input id="tenantId" placeholder="Example: punk_internal" />
-  </div>
-
-  <div class="row">
-    <label>Tenant Signature (required in production)</label>
-    <input id="tenantSignature" type="password" placeholder="Leave blank only for local development" />
-  </div>
-
-  <button onclick="runPrompt()">Run Audience Intelligence</button>
-
-  <h2>Result</h2>
-  <pre id="output">Waiting...</pre>
-
-  <script>
-    async function runPrompt() {
-      const output = document.getElementById("output");
-      output.textContent = "Running pipeline...";
-
-      const source = document.getElementById("source").value;
-      const payload = {
-        prompt: document.getElementById("prompt").value,
-        source: source,
-        safe_cohort_path: source === "safe_artifact" ? document.getElementById("safePath").value : null,
-        approval_required: true,
-        postgres_limit: 10000,
-        k_min: 1000,
-        epsilon: 1.0,
-        synthetic_rows: 1000,
-        max_export_cohorts: 25,
-        min_export_quality: 0.25
-      };
-
-      try {
-        const headers = {
-          "Content-Type": "application/json",
-          "X-Audience-API-Key": document.getElementById("apiKey").value.trim(),
-          "X-Audience-Tenant-Id": document.getElementById("tenantId").value.trim()
-        };
-        const tenantSignature = document.getElementById("tenantSignature").value.trim();
-        if (tenantSignature) {
-          headers["X-Audience-Tenant-Signature"] = tenantSignature;
-        }
-        const res = await fetch("/api/audience-intelligence/prompt/run", {
-          method: "POST",
-          headers: headers,
-          body: JSON.stringify(payload)
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          output.textContent = "Error:\\n" + JSON.stringify(data, null, 2);
-          return;
-        }
-
-        const v2 = data.v2_autonomous || {};
-        const embed = v2.embedding_manifest || {};
-        const mutation = v2.mutation || {};
-        const freshness = v2.data_freshness || {};
-        const review = data.v2_swarm_review || {};
-        const coverageWarnings = Array.from(new Set([
-          ...(data.coverage_warnings || []),
-          ...(review.coverage_warnings || []),
-          ...(v2.coverage_warnings || [])
-        ].filter(Boolean)));
-
-        const v2Summary = [
-          "===== Autonomous Audience Intelligence v2 =====",
-          "Status: " + (v2.status || "unknown"),
-          "Pipeline: " + (v2.pipeline_version || "unknown"),
-          "Freshness: " + (freshness.freshness_status ?? "unknown"),
-          "Latest source timestamp: " + (freshness.latest_source_timestamp ?? "unknown"),
-          "Source rows checked: " + (freshness.source_rows_checked ?? "unknown"),
-          "Vector count: " + (embed.vector_count ?? "unknown"),
-          "Vector dimension: " + (embed.vector_dimension ?? "unknown"),
-          "Ranked matches: " + (v2.ranked_match_count ?? "unknown"),
-          "Mutation suggestions: " + (mutation.suggestion_count ?? "unknown"),
-          "Approval required: " + (v2.approval_required ?? "unknown"),
-          "Downstream export enabled: " + (v2.downstream_export_enabled ?? "unknown"),
-          "Swarm review status: " + (review.overall_review_status || "unknown"),
-          "Data gaps: " + (review.data_gap_count ?? "unknown"),
-          "",
-          "Coverage warnings:",
-          ...coverageWarnings.map(w => "- " + w),
-          "",
-          "===== Business Summary =====",
-          ""
-        ].join("\\n");
-
-        const summary = String(data.business_summary || "");
-        output.textContent = v2Summary + summary.split("\\n").join(String.fromCharCode(10));
-      } catch (err) {
-        output.textContent = "Request failed: " + err;
-      }
-    }
-  </script>
-</body>
-</html>
-"""
+@router.get("/ui", response_class=RedirectResponse)
+def audience_prompt_ui() -> RedirectResponse:
+    return RedirectResponse(
+        url="/audience-workspace",
+        status_code=307,
+    )

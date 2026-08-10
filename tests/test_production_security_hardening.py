@@ -15,7 +15,6 @@ from app.services.production_security_hardening_service import (
     ProductionSecurityPostureService,
 )
 
-
 TENANT = "tenant_a"
 API_SECRET = "Aa1!Bb2@Cc3#Dd4$Ee5%Ff6^Gg7&Hh8*"
 TENANT_SECRET = "Zz9!Yy8@Xx7#Ww6$Vv5%Uu4^Tt3&Ss2*"
@@ -42,6 +41,8 @@ def complete_environment():
         "CONTAINER_RUNTIME_NON_ROOT": "true",
         "CONTAINER_ROOT_FILESYSTEM_READ_ONLY": "true",
         "CONTAINER_NO_NEW_PRIVILEGES": "true",
+        "MODULE5_AGENT_CAPABILITY_AUTHORIZATION_REQUIRED": "true",
+        "MODULE5_AGENT_PRODUCTION_EFFECT_AUTHORIZATION_ENABLED": "false",
         "DEBUG": "false",
     }
 
@@ -107,6 +108,23 @@ def test_wildcard_host_or_cors_and_release_flags_fail_closed():
         "cors_origins_restricted",
         "production_release_flags_disabled",
         "trusted_hosts_restricted",
+    }
+
+
+def test_agent_authorization_posture_fails_closed_if_required_gate_is_off_or_effects_on():
+    environment = complete_environment()
+    environment["MODULE5_AGENT_CAPABILITY_AUTHORIZATION_REQUIRED"] = "false"
+    environment["MODULE5_AGENT_PRODUCTION_EFFECT_AUTHORIZATION_ENABLED"] = "true"
+
+    posture = ProductionSecurityPostureService().assess(
+        request=request(), environment=environment
+    )
+
+    assert posture["posture_status"] == "fail_closed"
+    assert set(posture["failed_control_codes"]) >= {
+        "agent_capability_authorization_required",
+        "agent_production_effect_authority_disabled",
+        "production_release_flags_disabled",
     }
 
 

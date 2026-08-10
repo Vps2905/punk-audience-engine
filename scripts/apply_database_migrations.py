@@ -20,6 +20,10 @@ OPERATOR_ONLY_MIGRATIONS = {
 }
 
 
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def database_url() -> str:
     value = (
         os.getenv("PROVIDER_INGESTION_DATABASE_URL")
@@ -47,16 +51,51 @@ def database_url() -> str:
     return value
 
 
-def migration_files() -> list[Path]:
+def migration_files(*, include_operator_only: bool = False) -> list[Path]:
     return sorted(
         migration
         for migration in MIGRATIONS_DIR.glob("*.sql")
-        if migration.name not in OPERATOR_ONLY_MIGRATIONS
+        if include_operator_only
+        or migration.name not in OPERATOR_ONLY_MIGRATIONS
     )
 
 
-def apply_migrations() -> None:
-    files = migration_files()
+def _full_preproduction_migration_enabled() -> bool:
+    enabled = _truthy(
+        os.getenv("PREPRODUCTION_FULL_MIGRATION_ENABLED")
+    )
+    if not enabled:
+        return False
+    if not _truthy(os.getenv("PREPRODUCTION_DATABASE_BOOTSTRAP_CONFIRMED")):
+        raise RuntimeError(
+            "Full preproduction migration requires explicit bootstrap "
+            "confirmation."
+        )
+    if os.getenv("APP_ENV", "").strip().lower() not in {
+        "preproduction",
+        "staging",
+    }:
+        raise RuntimeError(
+            "Full preproduction migration requires APP_ENV=preproduction "
+            "or staging."
+        )
+    if os.getenv("PREPRODUCTION_DEPLOYMENT_PHASE", "").strip().lower() != (
+        "foundation"
+    ):
+        raise RuntimeError(
+            "Full preproduction migration is allowed only during the "
+            "foundation phase."
+        )
+    return True
+
+
+def apply_migrations(*, include_operator_only: bool | None = None) -> None:
+    include_all = (
+        _full_preproduction_migration_enabled()
+        if include_operator_only is None
+        else bool(include_operator_only)
+    )
+    files = migration_files(include_operator_only=include_all)
 
     if not files:
         print("NO_MIGRATIONS_FOUND")

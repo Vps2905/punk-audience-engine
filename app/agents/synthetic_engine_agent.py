@@ -89,6 +89,7 @@ class SyntheticEngineAgent:
         allow_fallback: Optional[bool] = None,
         run_id: Optional[str] = None,
         persist_artifacts: bool = True,
+        record_privacy_budget: bool = True,
     ) -> Dict[str, Any]:
         output_dir = Path(output_dir)
 
@@ -244,8 +245,13 @@ class SyntheticEngineAgent:
                 safe_input_schema,
             )
 
+        if not record_privacy_budget and persist_artifacts:
+            raise ValueError(
+                "Privacy-budget recording can only be suppressed for "
+                "non-persistent evaluation."
+            )
         privacy_budget_record = None
-        if engine_used in self.DP_ENGINES:
+        if engine_used in self.DP_ENGINES and record_privacy_budget:
             privacy_budget_record = self.ledger.record_spend(
                 run_id=run_id,
                 module="synthetic_generation",
@@ -317,6 +323,10 @@ class SyntheticEngineAgent:
             "k_min": k_min,
             "privacy_budget_recorded": privacy_budget_record is not None,
             "privacy_budget_record": privacy_budget_record,
+            "evaluation_only_without_budget_spend": (
+                privacy_budget_record is None
+                and engine_used in self.DP_ENGINES
+            ),
             "approval_status": approval_request["status"],
             "input_was_aggregated": True,
             "input_rows": int(len(safe_input)),

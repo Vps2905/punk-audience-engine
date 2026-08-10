@@ -8,6 +8,10 @@ Parameters:
   EnvironmentName:
     Type: String
     AllowedPattern: "^[a-z][a-z0-9-]{2,31}$"
+  DeploymentTenantId:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9_-]{2,62}$"
+    Description: Isolated tenant used for the preproduction runtime worker.
   VpcCidr:
     Type: String
     Default: 10.40.0.0/16
@@ -46,6 +50,14 @@ Parameters:
   DatabaseSecretArn:
     Type: String
     NoEcho: true
+    Description: Database administrator secret used only by RDS and the one-shot migration task.
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+  RuntimeDatabaseSecretArn:
+    Type: String
+    NoEcho: true
+    Description: >
+      Runtime-only database identities. The secret must contain separate
+      api_username, api_password, worker_username and worker_password keys.
     AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
   DataKmsKeyArn:
     Type: String
@@ -83,6 +95,13 @@ Parameters:
   ProductionCorsOrigins:
     Type: String
     AllowedPattern: "^https://.+$"
+  DeploymentPhase:
+    Type: String
+    Default: foundation
+    AllowedValues: [foundation, runtime]
+    Description: >
+      Foundation keeps runtime services at zero tasks until the reviewed
+      one-shot migration task succeeds. Runtime starts the API and worker.
   ApiDesiredCount:
     Type: Number
     Default: 2
@@ -121,6 +140,7 @@ Parameters:
 
 Conditions:
   AttachWebAcl: !Not [!Equals [!Ref WebAclArn, ""]]
+  RuntimeEnabled: !Equals [!Ref DeploymentPhase, runtime]
 
 Resources:
   RuntimeVpc:
@@ -443,7 +463,32 @@ Resources:
                 Action: secretsmanager:GetSecretValue
                 Resource:
                   - !Ref RuntimeSecretArn
+                  - !Ref RuntimeDatabaseSecretArn
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref SecretsKmsKeyArn
+  MigrationTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      Policies:
+        - PolicyName: MigrationSecretInjection
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
                   - !Ref DatabaseSecretArn
+                  - !Ref RuntimeDatabaseSecretArn
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource: !Ref SecretsKmsKeyArn
@@ -581,6 +626,8 @@ Resources:
               Value: "false"
             - Name: INFRASTRUCTURE_PRODUCTION_TRAFFIC_ENABLED
               Value: "false"
+            - Name: PREPRODUCTION_DEPLOYMENT_PHASE
+              Value: !Ref DeploymentPhase
             - Name: PROVIDER_SQS_QUEUE_URL
               Value: !Ref ProviderQueueUrl
             - Name: DATABASE_HOST
@@ -599,9 +646,9 @@ Resources:
             - Name: AUDIENCE_HASH_SALT
               ValueFrom: !Sub "${RuntimeSecretArn}:AUDIENCE_HASH_SALT::"
             - Name: DATABASE_USER
-              ValueFrom: !Sub "${DatabaseSecretArn}:username::"
+              ValueFrom: !Sub "${RuntimeDatabaseSecretArn}:api_username::"
             - Name: DATABASE_PASSWORD
-              ValueFrom: !Sub "${DatabaseSecretArn}:password::"
+              ValueFrom: !Sub "${RuntimeDatabaseSecretArn}:api_password::"
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -664,21 +711,92 @@ Resources:
               Value: "false"
             - Name: INFRASTRUCTURE_PRODUCTION_TRAFFIC_ENABLED
               Value: "false"
+            - Name: PREPRODUCTION_DEPLOYMENT_PHASE
+              Value: !Ref DeploymentPhase
           Secrets:
             - Name: AUDIENCE_DP_SEED_SECRET
               ValueFrom: !Sub "${RuntimeSecretArn}:AUDIENCE_DP_SEED_SECRET::"
             - Name: AUDIENCE_TOKENIZATION_HMAC_KEY
               ValueFrom: !Sub "${RuntimeSecretArn}:AUDIENCE_TOKENIZATION_HMAC_KEY::"
             - Name: DATABASE_USER
-              ValueFrom: !Sub "${DatabaseSecretArn}:username::"
+              ValueFrom: !Sub "${RuntimeDatabaseSecretArn}:worker_username::"
             - Name: DATABASE_PASSWORD
-              ValueFrom: !Sub "${DatabaseSecretArn}:password::"
+              ValueFrom: !Sub "${RuntimeDatabaseSecretArn}:worker_password::"
           LogConfiguration:
             LogDriver: awslogs
             Options:
               awslogs-group: !Ref WorkerLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: worker
+
+  MigrationTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${EnvironmentName}-punk-audience-migration"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "2048"
+      ExecutionRoleArn: !GetAtt MigrationTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ApiTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: audience-migration
+          Image: !Ref ContainerImage
+          Essential: true
+          Command: [python, scripts/production_runtime_entrypoint.py, migration]
+          User: "10001:10001"
+          ReadonlyRootFilesystem: true
+          LinuxParameters:
+            Capabilities:
+              Drop: [ALL]
+            InitProcessEnabled: true
+          Environment:
+            - Name: APP_ENV
+              Value: preproduction
+            - Name: PRODUCTION_MODE
+              Value: "true"
+            - Name: REQUIRE_DATABASE_TLS
+              Value: "true"
+            - Name: DATABASE_HOST
+              Value: !GetAtt RuntimeDatabase.Endpoint.Address
+            - Name: DATABASE_PORT
+              Value: !GetAtt RuntimeDatabase.Endpoint.Port
+            - Name: DATABASE_NAME
+              Value: punk_audience
+            - Name: PREPRODUCTION_DEPLOYMENT_PHASE
+              Value: foundation
+            - Name: PREPRODUCTION_TENANT_ID
+              Value: !Ref DeploymentTenantId
+            - Name: PREPRODUCTION_FULL_MIGRATION_ENABLED
+              Value: "true"
+            - Name: PREPRODUCTION_DATABASE_BOOTSTRAP_CONFIRMED
+              Value: "true"
+            - Name: INFRASTRUCTURE_APPLY_ENABLED
+              Value: "false"
+            - Name: INFRASTRUCTURE_PRODUCTION_TRAFFIC_ENABLED
+              Value: "false"
+          Secrets:
+            - Name: DATABASE_USER
+              ValueFrom: !Sub "${DatabaseSecretArn}:username::"
+            - Name: DATABASE_PASSWORD
+              ValueFrom: !Sub "${DatabaseSecretArn}:password::"
+            - Name: API_DATABASE_USER
+              ValueFrom: !Sub "${RuntimeDatabaseSecretArn}:api_username::"
+            - Name: API_DATABASE_PASSWORD
+              ValueFrom: !Sub "${RuntimeDatabaseSecretArn}:api_password::"
+            - Name: WORKER_DATABASE_USER
+              ValueFrom: !Sub "${RuntimeDatabaseSecretArn}:worker_username::"
+            - Name: WORKER_DATABASE_PASSWORD
+              ValueFrom: !Sub "${RuntimeDatabaseSecretArn}:worker_password::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref RuntimeLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: migration
 
   AlbLogBucket:
     Type: AWS::S3::Bucket
@@ -800,7 +918,7 @@ Resources:
     Properties:
       Cluster: !Ref RuntimeCluster
       TaskDefinition: !Ref ApiTaskDefinition
-      DesiredCount: !Ref ApiDesiredCount
+      DesiredCount: !If [RuntimeEnabled, !Ref ApiDesiredCount, 0]
       LaunchType: FARGATE
       PlatformVersion: LATEST
       EnableExecuteCommand: false
@@ -829,7 +947,7 @@ Resources:
     Properties:
       Cluster: !Ref RuntimeCluster
       TaskDefinition: !Ref WorkerTaskDefinition
-      DesiredCount: !Ref WorkerDesiredCount
+      DesiredCount: !If [RuntimeEnabled, !Ref WorkerDesiredCount, 0]
       LaunchType: FARGATE
       PlatformVersion: LATEST
       EnableExecuteCommand: false
@@ -851,6 +969,7 @@ Resources:
 
   ApiScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: RuntimeEnabled
     Properties:
       ServiceNamespace: ecs
       ScalableDimension: ecs:service:DesiredCount
@@ -859,6 +978,7 @@ Resources:
       MaxCapacity: !Ref ApiMaximumCount
   ApiCpuScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: RuntimeEnabled
     Properties:
       PolicyName: !Sub "${EnvironmentName}-api-cpu-target"
       PolicyType: TargetTrackingScaling
@@ -871,6 +991,7 @@ Resources:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
   WorkerScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: RuntimeEnabled
     Properties:
       ServiceNamespace: ecs
       ScalableDimension: ecs:service:DesiredCount
@@ -879,6 +1000,7 @@ Resources:
       MaxCapacity: !Ref WorkerMaximumCount
   WorkerCpuScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: RuntimeEnabled
     Properties:
       PolicyName: !Sub "${EnvironmentName}-worker-cpu-target"
       PolicyType: TargetTrackingScaling
@@ -892,6 +1014,7 @@ Resources:
 
   ApiHighCpuAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: RuntimeEnabled
     Properties:
       Namespace: AWS/ECS
       MetricName: CPUUtilization
@@ -910,6 +1033,7 @@ Resources:
       AlarmActions: [!Ref AlertTopicArn]
   UnhealthyTargetAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: RuntimeEnabled
     Properties:
       Namespace: AWS/ApplicationELB
       MetricName: UnHealthyHostCount
@@ -928,6 +1052,7 @@ Resources:
       AlarmActions: [!Ref AlertTopicArn]
   LoadBalancer5xxAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: RuntimeEnabled
     Properties:
       Namespace: AWS/ApplicationELB
       MetricName: HTTPCode_ELB_5XX_Count
@@ -976,6 +1101,8 @@ Resources:
       AlarmActions: [!Ref AlertTopicArn]
 
 Outputs:
+  DeploymentPhase:
+    Value: !Ref DeploymentPhase
   VpcId:
     Value: !Ref RuntimeVpc
   PrivateAppSubnetIds:
@@ -992,3 +1119,5 @@ Outputs:
     Value: !GetAtt ApiService.Name
   WorkerServiceName:
     Value: !GetAtt WorkerService.Name
+  MigrationTaskDefinitionArn:
+    Value: !Ref MigrationTaskDefinition

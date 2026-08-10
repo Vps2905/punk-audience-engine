@@ -17,7 +17,6 @@ from app.models.production_security_contracts import (
     ProductionSecurityAssessmentRequest,
 )
 
-
 _RELEASE_AFFECTING_FLAGS = (
     "MODULE2_MODEL_REGISTRATION_ENABLED",
     "MODULE2_PRODUCTION_ROUTING_ENABLED",
@@ -29,6 +28,8 @@ _RELEASE_AFFECTING_FLAGS = (
     "MODULE4_AUTOMATIC_EVOLUTION_ENABLED",
     "MODULE4_PRODUCTION_ROUTING_ENABLED",
     "MODULE5_AUTONOMOUS_MUTATION_ENABLED",
+    "MODULE5_AGENT_PRODUCTION_EFFECT_AUTHORIZATION_ENABLED",
+    "MODULE5_SCALE_RECOVERY_PRODUCTION_CUTOVER_ENABLED",
     "MODULE5_PRODUCTION_ROUTING_ENABLED",
     "QUALITY_AUTOMATIC_REMEDIATION_ENABLED",
     "QUALITY_PRODUCTION_ROUTING_ENABLED",
@@ -177,6 +178,14 @@ class ProductionSecurityPostureService:
             _truthy(environment.get(key)) for key in _RELEASE_AFFECTING_FLAGS
         )
         results = {
+            "agent_capability_authorization_required": _truthy(
+                environment.get("MODULE5_AGENT_CAPABILITY_AUTHORIZATION_REQUIRED")
+            ),
+            "agent_production_effect_authority_disabled": not _truthy(
+                environment.get(
+                    "MODULE5_AGENT_PRODUCTION_EFFECT_AUTHORIZATION_ENABLED"
+                )
+            ),
             "api_docs_disabled": production
             and not _truthy(environment.get("EXPOSE_API_DOCS")),
             "api_key_auth_required": _truthy(

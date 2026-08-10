@@ -141,6 +141,9 @@ def audience_agents_ui():
 from app.api.audience_intelligence_prompt import router as audience_intelligence_prompt_router
 app.include_router(audience_intelligence_prompt_router)
 
+from app.api.audience_intelligence_console import router as audience_intelligence_console_router
+app.include_router(audience_intelligence_console_router)
+
 from app.api.audience_intelligence_jobs import router as audience_intelligence_jobs_router
 _include_audience_router(audience_intelligence_jobs_router)
 

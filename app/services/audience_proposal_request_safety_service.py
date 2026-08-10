@@ -56,14 +56,64 @@ class AudienceProposalRequestSafetyService:
         r"no",
     )
     _EXPORT_ACTION = re.compile(
-        r"\b(?:export|upload|push|activate)\b"
-        r".{0,80}\b(?:audience|cohort|meta|destination|platform|campaign)\b"
+        r"\b(?:export|upload|push|activate|publish|launch)\b"
+        r".{0,80}\b(?:audience|cohort|recommendation|selection|meta|"
+        r"destination|platform|campaign)\b"
         r"|"
-        r"\b(?:audience|cohort)\b"
-        r".{0,80}\b(?:export|upload|push|activate)\b"
+        r"\b(?:audience|cohort|recommendation|selection)\b"
+        r".{0,80}\b(?:export|upload|push|activate|publish|launch)\b"
         r"|"
         r"\b(?:send|deliver)\b"
-        r".{0,80}\b(?:meta|destination|platform|ads?\s+manager)\b",
+        r".{0,80}\b(?:meta|destination|platform|ads?\s+manager)\b"
+        r"|"
+        r"\b(?:deliver|publish|launch)\b"
+        r".{0,80}\b(?:it|audience|cohort|recommendation|campaign)\b",
+        re.IGNORECASE,
+    )
+    _ACTION_PLANNING_OR_NEGATION = (
+        re.compile(
+            r"\b(?:do\s+not|don['’]?t|never|without)\b"
+            r".{0,80}?\b(?:export|upload|push|activate|publish|launch|"
+            r"send|deliver)\b"
+            r".{0,80}?(?=$|[,.;]|\b(?:but|however|yet|then)\b)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bkeep\b.{0,80}\b(?:activation|export|delivery)\b"
+            r".{0,40}\b(?:blocked|disabled|off)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:prepare|design|build|create|plan|recommend|evaluate|"
+            r"review|explain)\b.{0,120}\b(?:for\s+export|export-ready|"
+            r"activation-ready|delivery-ready)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:explain|describe|document|review)\b.{0,80}"
+            r"\bhow\s+to\s+(?:export|activate|deliver|publish|launch)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:export|activation|delivery)\s+"
+            r"(?:plan|strategy|workflow|readiness|documentation)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bplan\b.{0,40}\b(?:an?\s+)?"
+            r"(?:export|activation|delivery)\b",
+            re.IGNORECASE,
+        ),
+    )
+    _POLICY_BYPASS = re.compile(
+        r"\b(?:ignore|skip|bypass|override|disable|turn\s+off|"
+        r"circumvent|evade)\b.{0,100}\b(?:safety|safeguards?|"
+        r"guardrails?|governance|freshness|approval|checks?|"
+        r"restrictions?|polic(?:y|ies))\b"
+        r"|"
+        r"\b(?:safety|safeguards?|guardrails?|governance|freshness|"
+        r"approval|checks?|restrictions?|polic(?:y|ies))\b.{0,100}"
+        r"\b(?:ignore|skip|bypass|override|disable|circumvent|evade)\b",
         re.IGNORECASE,
     )
 
@@ -86,10 +136,18 @@ class AudienceProposalRequestSafetyService:
                     "cohorts are allowed."
                 ),
             )
-        if (
-            self._EXPORT_ACTION.search(intent)
-            and not self._has_structured_targeting(request)
-        ):
+        executable_intent = self._remove_safe_action_language(intent)
+        if self._EXPORT_ACTION.search(executable_intent):
+            if self._POLICY_BYPASS.search(intent):
+                return AudienceProposalSafetyDecision(
+                    terminal=True,
+                    reason_code="blocked_approval_bypass_attempt",
+                    explanation=(
+                        "Safety, freshness, governance, and manual approval "
+                        "controls cannot be bypassed. No audience data was "
+                        "read, ranked, activated, or exported."
+                    ),
+                )
             return AudienceProposalSafetyDecision(
                 terminal=True,
                 reason_code=(
@@ -101,6 +159,12 @@ class AudienceProposalRequestSafetyService:
                 ),
             )
         return AudienceProposalSafetyDecision(terminal=False)
+
+    def _remove_safe_action_language(self, intent: str) -> str:
+        remaining = intent
+        for pattern in self._ACTION_PLANNING_OR_NEGATION:
+            remaining = pattern.sub(" ", remaining)
+        return re.sub(r"\s+", " ", remaining).strip()
 
     def _is_raw_identifier_request(self, intent: str) -> bool:
         identifiers = "(?:" + "|".join(self._IDENTIFIER_TERMS) + ")"
@@ -120,26 +184,3 @@ class AudienceProposalRequestSafetyService:
                 re.IGNORECASE,
             )
         )
-
-    def _has_structured_targeting(
-        self,
-        request: Mapping[str, Any],
-    ) -> bool:
-        return any(
-            self._has_values(request.get(field))
-            for field in (
-                "locations",
-                "categories",
-                "dayparts",
-            )
-        )
-
-    def _has_values(self, value: Any) -> bool:
-        if value is None:
-            return False
-        if isinstance(value, str):
-            return bool(value.strip())
-        try:
-            return any(str(item or "").strip() for item in value)
-        except TypeError:
-            return bool(str(value).strip())

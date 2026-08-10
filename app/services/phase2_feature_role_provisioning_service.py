@@ -215,6 +215,9 @@ class Phase2FeatureRoleProvisioningService:
                 "own_tenant_count"
             ],
             "reader_can_write": False,
+            "reader_can_read_approved_model_registry": reader_verification[
+                "approved_model_registry_readable"
+            ],
             "writer_can_insert_update": True,
             "writer_can_delete": False,
             "reader_can_create_schema_objects": False,
@@ -409,7 +412,7 @@ class Phase2FeatureRoleProvisioningService:
                 )
             connection.exec_driver_sql(
                 "GRANT SELECT ON public.audience_embedding_models "
-                f"TO {writer}"
+                f"TO {reader}, {writer}"
             )
             connection.exec_driver_sql(
                 "GRANT SELECT, INSERT, UPDATE ON "
@@ -484,7 +487,7 @@ class Phase2FeatureRoleProvisioningService:
         expected_role: str,
         tenant_id: str,
         expected_feature_count: int,
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         engine = self._engine_factory(database_url, pool_pre_ping=True)
         try:
             with engine.connect() as connection:
@@ -519,6 +522,10 @@ class Phase2FeatureRoleProvisioningService:
         return {
             "own_tenant_count": own_count,
             "other_tenant_count": other_count,
+            "approved_model_registry_readable": bool(
+                role["registry_tables_present"]
+                and role["can_select_embedding_models"]
+            ),
         }
 
     def _verify_writer(
@@ -632,6 +639,68 @@ class Phase2FeatureRoleProvisioningService:
                     ) AS can_read_migration_ledger,
                     (
                         to_regclass(
+                            'public.audience_embedding_models'
+                        ) IS NOT NULL
+                        AND to_regclass(
+                            'public.audience_feature_build_jobs'
+                        ) IS NOT NULL
+                    ) AS registry_tables_present,
+                    CASE WHEN to_regclass(
+                        'public.audience_embedding_models'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_embedding_models',
+                        'SELECT'
+                    ) END AS can_select_embedding_models,
+                    CASE WHEN to_regclass(
+                        'public.audience_embedding_models'
+                    ) IS NULL THEN FALSE ELSE (
+                        has_table_privilege(
+                            current_user,
+                            'public.audience_embedding_models',
+                            'INSERT'
+                        )
+                        OR has_table_privilege(
+                            current_user,
+                            'public.audience_embedding_models',
+                            'UPDATE'
+                        )
+                        OR has_table_privilege(
+                            current_user,
+                            'public.audience_embedding_models',
+                            'DELETE'
+                        )
+                    ) END AS can_mutate_embedding_models,
+                    CASE WHEN to_regclass(
+                        'public.audience_feature_build_jobs'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_feature_build_jobs',
+                        'SELECT'
+                    ) END AS can_select_feature_build_jobs,
+                    CASE WHEN to_regclass(
+                        'public.audience_feature_build_jobs'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_feature_build_jobs',
+                        'INSERT'
+                    ) END AS can_insert_feature_build_jobs,
+                    CASE WHEN to_regclass(
+                        'public.audience_feature_build_jobs'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_feature_build_jobs',
+                        'UPDATE'
+                    ) END AS can_update_feature_build_jobs,
+                    CASE WHEN to_regclass(
+                        'public.audience_feature_build_jobs'
+                    ) IS NULL THEN FALSE ELSE has_table_privilege(
+                        current_user,
+                        'public.audience_feature_build_jobs',
+                        'DELETE'
+                    ) END AS can_delete_feature_build_jobs,
+                    (
+                        to_regclass(
                             'public.audience_fresh_data_workflows'
                         ) IS NOT NULL
                         AND to_regclass(
@@ -741,6 +810,17 @@ class Phase2FeatureRoleProvisioningService:
             or role["can_delete_feature_sets"]
             or role["can_delete_feature_vectors"]
             or role["can_read_migration_ledger"]
+            or (
+                role["registry_tables_present"]
+                and (
+                    not role["can_select_embedding_models"]
+                    or role["can_mutate_embedding_models"]
+                    or role["can_select_feature_build_jobs"]
+                    or role["can_insert_feature_build_jobs"]
+                    or role["can_update_feature_build_jobs"]
+                    or role["can_delete_feature_build_jobs"]
+                )
+            )
             or role["can_select_fresh_data_workflows"]
             or role["can_insert_fresh_data_workflows"]
             or role["can_update_fresh_data_workflows"]
@@ -778,6 +858,17 @@ class Phase2FeatureRoleProvisioningService:
             or role["can_delete_feature_sets"]
             or role["can_delete_feature_vectors"]
             or role["can_read_migration_ledger"]
+            or (
+                role["registry_tables_present"]
+                and (
+                    not role["can_select_embedding_models"]
+                    or role["can_mutate_embedding_models"]
+                    or not role["can_select_feature_build_jobs"]
+                    or not role["can_insert_feature_build_jobs"]
+                    or not role["can_update_feature_build_jobs"]
+                    or role["can_delete_feature_build_jobs"]
+                )
+            )
             or (
                 role["workflow_tables_present"]
                 and (

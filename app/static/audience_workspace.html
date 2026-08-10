@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Punk AI — Audience Intelligence</title>
+  <link rel="stylesheet" href="/audience-workspace/assets/styles.css">
+  <script src="/audience-workspace/assets/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <a class="brand" href="/audience-workspace" aria-label="Punk AI home">
+        <span class="brand-mark" aria-hidden="true">P</span>
+        <span class="brand-copy">
+          <strong>PUNK AI</strong>
+          <small>Audience intelligence</small>
+        </span>
+      </a>
+
+      <button class="new-run" id="newRunButton" type="button">
+        <span aria-hidden="true">＋</span>
+        New analysis
+      </button>
+
+      <nav class="primary-nav" aria-label="Primary">
+        <button class="nav-item active" type="button">
+          <span class="nav-icon" aria-hidden="true">⌁</span>
+          Intelligence
+        </button>
+        <button class="nav-item" id="historyNav" type="button">
+          <span class="nav-icon" aria-hidden="true">↺</span>
+          Run history
+        </button>
+        <button class="nav-item" id="evidenceNav" type="button">
+          <span class="nav-icon" aria-hidden="true">◇</span>
+          Safety evidence
+        </button>
+      </nav>
+
+      <section class="recent-section" aria-labelledby="recentTitle">
+        <div class="section-label" id="recentTitle">Recent analyses</div>
+        <div class="recent-list" id="recentRuns">
+          <p class="recent-empty">Your completed analyses will appear here.</p>
+        </div>
+      </section>
+
+      <div class="sidebar-footer">
+        <div class="system-line">
+          <span class="status-dot" aria-hidden="true"></span>
+          Local secure session
+        </div>
+        <small>Credentials remain on the server</small>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Audience Intelligence</p>
+          <h1>Campaign strategy workspace</h1>
+        </div>
+        <div class="topbar-actions">
+          <div class="mode-badge" id="modeBadge">
+            <span class="mode-pulse" aria-hidden="true"></span>
+            <span id="modeText">Historical shadow</span>
+          </div>
+          <div class="avatar" aria-label="Local operator">VP</div>
+        </div>
+      </header>
+
+      <div class="workspace-scroll" id="workspaceScroll">
+        <section class="hero" id="heroSection">
+          <div class="hero-orbit" aria-hidden="true">
+            <span></span><span></span><span></span>
+            <div class="hero-core">P</div>
+          </div>
+          <p class="hero-kicker">Governed audience planning</p>
+          <h2>What audience should we understand today?</h2>
+          <p class="hero-copy">
+            Describe the business goal in normal language. Punk AI will inspect
+            available privacy-safe data, explain coverage and prepare a
+            reviewable strategy—without activating or exporting anything.
+          </p>
+
+          <div class="suggestion-grid" aria-label="Suggested analyses">
+            <button class="suggestion" type="button" data-prompt="Find the strongest privacy-safe audiences for my campaign and explain why they fit.">
+              <span class="suggestion-icon">↗</span>
+              <span><strong>Discover an audience</strong><small>Start from a business goal</small></span>
+            </button>
+            <button class="suggestion" type="button" data-prompt="Compare a high-quality audience strategy with a broader-reach strategy using available data.">
+              <span class="suggestion-icon">≋</span>
+              <span><strong>Compare strategies</strong><small>Quality versus reach</small></span>
+            </button>
+            <button class="suggestion" type="button" data-prompt="Explain the current audience data coverage, freshness, and important gaps before I plan a campaign.">
+              <span class="suggestion-icon">◎</span>
+              <span><strong>Inspect coverage</strong><small>Freshness and data gaps</small></span>
+            </button>
+            <button class="suggestion" type="button" data-prompt="Show which audience recommendations are safe for review and which actions remain blocked.">
+              <span class="suggestion-icon">⌾</span>
+              <span><strong>Review safety</strong><small>Approvals and restrictions</small></span>
+            </button>
+          </div>
+        </section>
+
+        <section class="conversation hidden" id="conversation" aria-live="polite">
+          <article class="message user-message">
+            <div class="message-avatar">VP</div>
+            <div>
+              <div class="message-meta">You</div>
+              <p id="submittedPrompt"></p>
+            </div>
+          </article>
+
+          <article class="message ai-message">
+            <div class="message-avatar ai-avatar">P</div>
+            <div class="message-content">
+              <div class="message-meta">Punk AI</div>
+              <p id="assistantLead">I’m evaluating the request against the governed audience pipeline.</p>
+
+              <section class="pipeline-panel" aria-labelledby="pipelineTitle">
+                <div class="panel-heading">
+                  <div>
+                    <span class="panel-kicker">Live execution</span>
+                    <h3 id="pipelineTitle">Five-module analysis</h3>
+                  </div>
+                  <span class="elapsed" id="elapsedTime">0s</span>
+                </div>
+                <div class="pipeline" id="pipelineStages">
+                  <div class="stage" data-stage="1">
+                    <span class="stage-number">01</span>
+                    <div><strong>Data & privacy</strong><small>Queued</small></div>
+                    <span class="stage-state"></span>
+                  </div>
+                  <div class="stage" data-stage="2">
+                    <span class="stage-number">02</span>
+                    <div><strong>Semantic retrieval</strong><small>Queued</small></div>
+                    <span class="stage-state"></span>
+                  </div>
+                  <div class="stage" data-stage="3">
+                    <span class="stage-number">03</span>
+                    <div><strong>Cohort intelligence</strong><small>Queued</small></div>
+                    <span class="stage-state"></span>
+                  </div>
+                  <div class="stage" data-stage="4">
+                    <span class="stage-number">04</span>
+                    <div><strong>Evolution review</strong><small>Queued</small></div>
+                    <span class="stage-state"></span>
+                  </div>
+                  <div class="stage" data-stage="5">
+                    <span class="stage-number">05</span>
+                    <div><strong>Governance</strong><small>Queued</small></div>
+                    <span class="stage-state"></span>
+                  </div>
+                </div>
+              </section>
+
+              <div class="result-area hidden" id="resultArea">
+                <section class="status-grid" aria-label="Run status">
+                  <article class="status-card">
+                    <span>Run status</span><strong id="runStatus">—</strong>
+                  </article>
+                  <article class="status-card">
+                    <span>Data freshness</span><strong id="freshnessStatus">—</strong>
+                  </article>
+                  <article class="status-card">
+                    <span>Selected cohorts</span><strong id="cohortCount">—</strong>
+                  </article>
+                  <article class="status-card">
+                    <span>Activation</span><strong id="activationStatus">Blocked</strong>
+                  </article>
+                </section>
+
+                <section class="result-card decision-card">
+                  <div class="result-card-heading">
+                    <div>
+                      <span class="panel-kicker">Decision</span>
+                      <h3>Audience recommendation</h3>
+                    </div>
+                    <span class="decision-badge" id="decisionBadge">Review required</span>
+                  </div>
+                  <div class="summary-content" id="businessSummary"></div>
+                </section>
+
+                <div class="result-columns">
+                  <section class="result-card">
+                    <div class="result-card-heading">
+                      <div><span class="panel-kicker">Evidence</span><h3>Retrieval signals</h3></div>
+                    </div>
+                    <dl class="metric-list">
+                      <div><dt>Source rows checked</dt><dd id="sourceRows">—</dd></div>
+                      <div><dt>Vector count</dt><dd id="vectorCount">—</dd></div>
+                      <div><dt>Embedding dimension</dt><dd id="vectorDimension">—</dd></div>
+                      <div><dt>Ranked matches</dt><dd id="rankedMatches">—</dd></div>
+                    </dl>
+                  </section>
+
+                  <section class="result-card safety-card">
+                    <div class="result-card-heading">
+                      <div><span class="panel-kicker">Guardrails</span><h3>Privacy & delivery</h3></div>
+                    </div>
+                    <div class="safety-line"><span class="check">✓</span><span>Raw identifiers are not returned</span></div>
+                    <div class="safety-line"><span class="check">✓</span><span>Manual approval remains required</span></div>
+                    <div class="safety-line"><span class="lock">×</span><span id="exportSafetyText">Downstream export is blocked</span></div>
+                  </section>
+                </div>
+
+                <section class="result-card warning-card hidden" id="warningCard">
+                  <div class="result-card-heading">
+                    <div><span class="panel-kicker">Review before use</span><h3>Coverage and data warnings</h3></div>
+                  </div>
+                  <ul id="warningList"></ul>
+                </section>
+
+                <div class="run-reference" id="runReference"></div>
+              </div>
+
+              <div class="error-card hidden" id="errorCard" role="alert">
+                <strong>Analysis could not complete</strong>
+                <p id="errorMessage"></p>
+                <button type="button" id="retryButton">Try again</button>
+              </div>
+            </div>
+          </article>
+        </section>
+      </div>
+
+      <footer class="composer-wrap">
+        <form class="composer" id="promptForm">
+          <label class="sr-only" for="promptInput">Describe your audience goal</label>
+          <textarea id="promptInput" rows="1" maxlength="4000" placeholder="Describe your campaign goal, audience, location, budget, or constraints…" required></textarea>
+          <div class="composer-actions">
+            <span class="composer-note"><span class="shield">◇</span> Privacy-safe analysis</span>
+            <button class="send-button" id="sendButton" type="submit" aria-label="Run audience analysis">
+              <span>Run analysis</span><span aria-hidden="true">↑</span>
+            </button>
+          </div>
+        </form>
+        <p class="footer-note">Historical data is used for evaluation only. No audience is activated or exported.</p>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

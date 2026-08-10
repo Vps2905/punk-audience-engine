@@ -25,6 +25,9 @@ from app.services.autonomous_audience_intelligence_v2_service import (
 from app.services.embedding_service import embed_records
 from app.services.vector_store_service import load_vector_store
 from app.core.production_guardrails import local_file_storage_allowed
+from app.services.audience_proposal_request_safety_service import (
+    AudienceProposalRequestSafetyService,
+)
 
 
 class AudienceIntelligenceOrchestratorAgent:
@@ -67,11 +70,28 @@ class AudienceIntelligenceOrchestratorAgent:
         min_export_quality: float = 0.25,
         approval_required: bool = True,
         semantic_intent: Optional[Dict[str, Any]] = None,
+        persist_artifacts: Optional[bool] = None,
+        certification_evaluation: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         run_id = self._build_run_id(prompt)
         run_dir = Path(output_root) / run_id
-        persist_artifacts = local_file_storage_allowed()
+        persist_artifacts = (
+            local_file_storage_allowed()
+            if persist_artifacts is None
+            else bool(persist_artifacts)
+        )
+        if persist_artifacts and not local_file_storage_allowed():
+            raise RuntimeError(
+                "Local artifact persistence is disabled in this environment."
+            )
+        if certification_evaluation and (
+            persist_artifacts or approval_required is not True
+        ):
+            raise ValueError(
+                "Certification evaluation requires in-memory execution and "
+                "manual approval."
+            )
 
         if persist_artifacts:
             run_dir.mkdir(
@@ -101,6 +121,38 @@ class AudienceIntelligenceOrchestratorAgent:
         print("PROMPT:", prompt)
         print("RUN DIR:", run_dir)
         print()
+
+        safety_decision = (
+            AudienceProposalRequestSafetyService().evaluate(
+                {
+                    "audience_intent": prompt,
+                }
+            )
+        )
+        if safety_decision.terminal:
+            prompt_filter_report = (
+                self._build_preflight_prompt_filter_report(
+                    reason_code=str(
+                        safety_decision.reason_code or ""
+                    ),
+                    explanation=str(
+                        safety_decision.explanation or ""
+                    ),
+                )
+            )
+            return self._build_terminal_prompt_safety_result(
+                prompt=prompt,
+                run_id=run_id,
+                run_reference=run_reference,
+                final_summary_reference=final_summary_reference,
+                final_summary_path=final_summary_path,
+                persist_artifacts=persist_artifacts,
+                source_mode="not_evaluated",
+                source_rows=None,
+                source_columns=[],
+                privacy_cohorts=pd.DataFrame(),
+                prompt_filter_report=prompt_filter_report,
+            )
 
         if source == "postgres":
             safe_raw_input = self._load_safe_rows_from_postgres(
@@ -136,6 +188,7 @@ class AudienceIntelligenceOrchestratorAgent:
                 k_min=k_min,
                 epsilon=epsilon,
                 persist_artifacts=persist_artifacts,
+                record_privacy_budget=not certification_evaluation,
             )
 
             privacy_records = (
@@ -151,9 +204,10 @@ class AudienceIntelligenceOrchestratorAgent:
                 )
                 privacy_cohorts = pd.read_csv(privacy_feature_path)
         else:
-            privacy_dir.mkdir(parents=True, exist_ok=True)
             privacy_feature_path = privacy_dir / "clean_feature_table.csv"
-            safe_raw_input.to_csv(privacy_feature_path, index=False)
+            if persist_artifacts:
+                privacy_dir.mkdir(parents=True, exist_ok=True)
+                safe_raw_input.to_csv(privacy_feature_path, index=False)
             privacy_result = {
                 "status": "skipped_existing_safe_artifact",
                 "feature_path": str(privacy_feature_path),
@@ -482,6 +536,7 @@ class AudienceIntelligenceOrchestratorAgent:
                 "epsilon": epsilon,
                 "k_min": k_min,
                 "persist_artifacts": persist_artifacts,
+                "record_privacy_budget": not certification_evaluation,
             },
         )
 
@@ -495,6 +550,7 @@ class AudienceIntelligenceOrchestratorAgent:
             cohort_dir=cohort_dir,
             run_id=run_id,
             min_export_quality=min_export_quality,
+            persist_artifacts=persist_artifacts,
         )
 
         print("EMBEDDING STATUS:", embedding_result["status"])
@@ -698,7 +754,7 @@ class AudienceIntelligenceOrchestratorAgent:
             approval_required=approval_required,
             min_management_quality=min_export_quality,
             max_export_cohorts=max_export_cohorts,
-            persist_artifacts=local_file_storage_allowed(),
+            persist_artifacts=persist_artifacts,
         )
 
         export_result = self._apply_freshness_fail_closed(
@@ -773,6 +829,7 @@ class AudienceIntelligenceOrchestratorAgent:
                 "approval_required": bool(approval_required),
                 "approval_status": export_result["approval_status"],
             },
+            "certification_evaluation": bool(certification_evaluation),
             "run_dir": run_reference,
             "final_summary_path": final_summary_reference,
         }
@@ -832,6 +889,7 @@ class AudienceIntelligenceOrchestratorAgent:
         cohort_dir: Path,
         run_id: str,
         min_export_quality: float,
+        persist_artifacts: bool = True,
     ):
         """
         Use the active Postgres vector backend in production-style environments.
@@ -847,7 +905,7 @@ class AudienceIntelligenceOrchestratorAgent:
             "pgvector",
         }
 
-        if vector_backend in postgres_backends:
+        if vector_backend in postgres_backends and persist_artifacts:
             embedding_job_id = f"{run_id}_embedding"
             safe_records = (
                 selected_cohorts
@@ -919,31 +977,52 @@ class AudienceIntelligenceOrchestratorAgent:
                 top_n=25,
                 lookalike_top_k=3,
                 min_export_quality=min_export_quality,
-                persist_artifacts=local_file_storage_allowed(),
+                persist_artifacts=persist_artifacts,
             )
 
             return embedding_result, cohort_result
 
-        # Local development/test compatibility path.
-        embedding_result = EmbeddingFeatureStoreAgent().build(
-            cohorts=selected_cohorts,
-            output_dir=embedding_dir,
-            embedding_provider="sklearn_tfidf",
-            run_id=f"{run_id}_embedding",
-            max_features=384,
-        )
-
-        cohort_result = CohortManagementAgent().run_from_artifacts(
-            metadata_path=embedding_result["outputs"]["cohort_metadata"],
-            vectors_path=embedding_result["outputs"]["cohort_vectors"],
-            output_dir=cohort_dir,
-            run_id=f"{run_id}_cohort_management",
-            min_clusters=2,
-            max_clusters=8,
-            top_n=25,
-            lookalike_top_k=3,
-            min_export_quality=min_export_quality,
-        )
+        embedding_agent = EmbeddingFeatureStoreAgent()
+        if persist_artifacts:
+            embedding_result = embedding_agent.build(
+                cohorts=selected_cohorts,
+                output_dir=embedding_dir,
+                embedding_provider="sklearn_tfidf",
+                run_id=f"{run_id}_embedding",
+                max_features=384,
+            )
+            cohort_result = CohortManagementAgent().run_from_artifacts(
+                metadata_path=embedding_result["outputs"]["cohort_metadata"],
+                vectors_path=embedding_result["outputs"]["cohort_vectors"],
+                output_dir=cohort_dir,
+                run_id=f"{run_id}_cohort_management",
+                min_clusters=2,
+                max_clusters=8,
+                top_n=25,
+                lookalike_top_k=3,
+                min_export_quality=min_export_quality,
+            )
+        else:
+            embedding_result, metadata, vectors = (
+                embedding_agent.build_in_memory(
+                    cohorts=selected_cohorts,
+                    embedding_provider="sklearn_tfidf",
+                    run_id=f"{run_id}_embedding",
+                    max_features=384,
+                )
+            )
+            cohort_result = CohortManagementAgent().run(
+                metadata=metadata,
+                vectors=vectors,
+                output_dir=cohort_dir,
+                run_id=f"{run_id}_cohort_management",
+                min_clusters=2,
+                max_clusters=8,
+                top_n=25,
+                lookalike_top_k=3,
+                min_export_quality=min_export_quality,
+                persist_artifacts=False,
+            )
 
         return embedding_result, cohort_result
 
@@ -1600,6 +1679,7 @@ class AudienceIntelligenceOrchestratorAgent:
         k_min: int,
         epsilon: float,
         persist_artifacts: bool,
+        record_privacy_budget: bool = True,
     ) -> Dict[str, Any]:
         if persist_artifacts:
             output_dir.mkdir(
@@ -1629,6 +1709,7 @@ class AudienceIntelligenceOrchestratorAgent:
                 "k_min": k_min,
                 "epsilon": epsilon,
                 "persist_artifacts": persist_artifacts,
+                "record_privacy_budget": record_privacy_budget,
             },
         )
 
@@ -2182,6 +2263,54 @@ class AudienceIntelligenceOrchestratorAgent:
         ) in {
             "privacy_identifier_request_blocked",
             "export_action_requires_existing_audience",
+            "approval_bypass_attempt_blocked",
+        }
+
+    def _build_preflight_prompt_filter_report(
+        self,
+        *,
+        reason_code: str,
+        explanation: str,
+    ) -> Dict[str, Any]:
+        if reason_code == "blocked_privacy_identifier_request":
+            filter_mode = "privacy_identifier_request_blocked"
+            default_explanation = (
+                "Raw identifiers and individual-level user data cannot be "
+                "retrieved or exported. Only privacy-safe aggregated "
+                "cohorts are allowed."
+            )
+        elif reason_code == "blocked_approval_bypass_attempt":
+            filter_mode = "approval_bypass_attempt_blocked"
+            default_explanation = (
+                "Safety, freshness, governance, and manual approval "
+                "controls cannot be bypassed. No audience data was read, "
+                "ranked, activated, or exported."
+            )
+        else:
+            filter_mode = (
+                "export_action_requires_existing_audience"
+            )
+            default_explanation = (
+                "An export action requires an explicit existing audience "
+                "or run and an authoritative approval record. No audience "
+                "data was read, ranked, activated, or exported."
+            )
+        message = explanation or default_explanation
+        return {
+            "enabled": True,
+            "filter_mode": filter_mode,
+            "block_export": True,
+            "export_blocked": True,
+            "downstream_export_enabled": False,
+            "reason": reason_code,
+            "locations_detected": [],
+            "poi_terms_detected": [],
+            "dayparts_detected": [],
+            "coverage_warnings": [message],
+            "selected_count": 0,
+            "preflight_decision": True,
+            "source_read_performed": False,
+            "model_evaluation_performed": False,
         }
 
     def _build_terminal_prompt_safety_result(
@@ -2194,7 +2323,7 @@ class AudienceIntelligenceOrchestratorAgent:
         final_summary_path: Path,
         persist_artifacts: bool,
         source_mode: str,
-        source_rows: int,
+        source_rows: int | None,
         source_columns: list[str],
         privacy_cohorts: pd.DataFrame,
         prompt_filter_report: Dict[str, Any],
@@ -2226,6 +2355,14 @@ class AudienceIntelligenceOrchestratorAgent:
                 "privacy-safe aggregated cohorts are allowed."
             )
             review_reason = "privacy_identifier_request_blocked"
+        elif filter_mode == "approval_bypass_attempt_blocked":
+            approval_status = "blocked_approval_bypass_attempt"
+            status_message = (
+                "Safety, freshness, governance, and manual approval "
+                "controls cannot be bypassed. No audience data was read, "
+                "ranked, activated, or exported."
+            )
+            review_reason = "approval_bypass_attempt_blocked"
         else:
             approval_status = (
                 "blocked_export_action_requires_existing_audience"
@@ -2273,24 +2410,34 @@ class AudienceIntelligenceOrchestratorAgent:
             "approval_status": approval_status,
             "downstream_export_enabled": False,
             "block_export": True,
-            "block_export_reason": review_reason,
+            "block_export_reason": status_message,
             "exported_cohorts": 0,
             "exported_lookalike_pairs": 0,
             "outputs": {},
         }
 
         final_summary = {
-            "status": "completed",
+            "status": "skipped",
             "run_id": run_id,
             "prompt": prompt,
             "run_dir": run_reference,
             "source_mode": source_mode,
-            "source_rows": int(source_rows),
+            "source_rows": (
+                int(source_rows)
+                if source_rows is not None
+                else None
+            ),
             "source_columns": source_columns,
             "approval_status": approval_status,
             "downstream_export_enabled": False,
             "block_export": True,
-            "block_export_reason": review_reason,
+            "block_export_reason": status_message,
+            "policy_reason_code": approval_status,
+            "terminal_policy_decision": True,
+            "freshness_status": "not_evaluated",
+            "pipeline_stages": self._terminal_pipeline_stages(
+                filter_mode=filter_mode,
+            ),
             "privacy_cohorts": int(len(privacy_cohorts)),
             "prompt_selected_cohorts": 0,
             "prompt_filter_report": report,
@@ -2335,6 +2482,48 @@ class AudienceIntelligenceOrchestratorAgent:
         print()
 
         return final_summary
+
+    def _terminal_pipeline_stages(
+        self,
+        *,
+        filter_mode: str,
+    ) -> list[Dict[str, str]]:
+        if filter_mode == "privacy_identifier_request_blocked":
+            boundary_detail = "Prohibited identifier request blocked"
+            governance_detail = "Privacy policy enforced"
+        elif filter_mode == "approval_bypass_attempt_blocked":
+            boundary_detail = "Policy-bypass attempt blocked"
+            governance_detail = "Approval controls enforced"
+        else:
+            boundary_detail = "Action request blocked before data access"
+            governance_detail = "Existing approved audience required"
+        return [
+            {
+                "id": "data_privacy",
+                "status": "blocked",
+                "detail": boundary_detail,
+            },
+            {
+                "id": "semantic_retrieval",
+                "status": "skipped",
+                "detail": "Not evaluated",
+            },
+            {
+                "id": "cohort_intelligence",
+                "status": "skipped",
+                "detail": "Not evaluated",
+            },
+            {
+                "id": "evolution_review",
+                "status": "skipped",
+                "detail": "Not evaluated",
+            },
+            {
+                "id": "governance",
+                "status": "blocked",
+                "detail": governance_detail,
+            },
+        ]
 
     def _safe_dict(self, value: Any) -> Any:
         if isinstance(value, dict):

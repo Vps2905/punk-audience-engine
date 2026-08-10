@@ -13,14 +13,20 @@ This guide covers setup, execution, and troubleshooting for the Audience Intelli
    ```
 
 2. **Run Backend:**
-   Run the backend with production constraints enabled locally:
+   Run the loopback-only operator workspace with production guardrail
+   defaults preserved:
    ```bash
-   PYTHONPATH=. PRODUCTION_MODE=true REQUIRE_AUDIENCE_API_KEY=true SYNTHETIC_ENGINE=dp_aggregate ALLOW_SYNTHETIC_FALLBACK=false K_ANONYMITY_MIN=1000 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   PYTHONPATH=. AUDIENCE_LOCAL_UI_ENABLED=true AUDIENCE_LOCAL_UI_TENANT_ID=punk_internal PRODUCTION_MODE=false APP_ENV=local REQUIRE_AUDIENCE_API_KEY=true SYNTHETIC_ENGINE=dp_aggregate ALLOW_SYNTHETIC_FALLBACK=false K_ANONYMITY_MIN=1000 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
    ```
 
 3. **Open Prompt UI:**
    Navigate in your browser to:
-   `http://localhost:8000/api/audience-intelligence/prompt/ui`
+   `http://127.0.0.1:8000/audience-workspace`
+
+   The local workspace uses an HttpOnly, loopback-only session. It never asks
+   the operator to paste an API key, tenant signature, or server data path into
+   the browser. The production `/run` API continues to require the shared
+   authenticated tenant boundary.
 
 4. **Run Health Check:**
    ```bash
@@ -81,3 +87,26 @@ This guide covers setup, execution, and troubleshooting for the Audience Intelli
 - **UI stuck on Waiting:** The async job might have failed silently or the backend is not responding. Check the backend logs.
 - **`favicon.ico 404` is harmless:** This error in the browser console can be safely ignored.
 - **Coverage warning explanation:** If you receive a warning that exact city/category/daypart data is unavailable, it means the required sample size in the underlying data did not meet the strict `k_min` privacy threshold. The system will safely expand the search or provide a reduced cohort rather than returning unsafe sparse data.
+
+## Terminal safety and action boundary
+
+The prompt endpoint is an analysis and audience-preparation interface. It is
+not an activation or delivery interface. Explicit raw-identifier disclosure,
+immediate export/activation, and policy-bypass language is evaluated before
+source access, privacy processing, semantic retrieval, cohort generation, or
+export agents are invoked.
+
+Terminal decisions use these contracts:
+
+- `blocked_privacy_identifier_request`
+- `blocked_export_action_requires_existing_audience`
+- `blocked_approval_bypass_attempt`
+
+For these decisions, `source_mode` and `freshness_status` are
+`not_evaluated`, `source_rows` is null, and the backend returns authoritative
+blocked/skipped pipeline stages. No location or category mentioned in the
+prompt can turn an explicit action command into an audience-analysis request.
+
+Production approval remains a separate authenticated workflow bound to an
+explicit `run_id`. Prompt text such as "approved", "skip approval", or
+"ignore safety" is never treated as authorization.

@@ -143,6 +143,7 @@ class PrivacyLayerAgent:
         run_id: Optional[str] = None,
         hash_secret: Optional[str] = None,
         persist_artifacts: bool = True,
+        record_privacy_budget: bool = True,
     ) -> Dict[str, Any]:
         output_dir = Path(output_dir)
 
@@ -212,18 +213,25 @@ class PrivacyLayerAgent:
                 index=False,
             )
 
-        budget_record = self.ledger.record_spend(
-            run_id=run_id,
-            module="privacy_layer",
-            epsilon=epsilon,
-            engine="laplace_dp_noise",
-            metadata={
-                "input_rows": int(len(data)),
-                "output_safe_cohorts": int(len(safe_df)),
-                "blocked_cohorts": int(blocked_cohorts),
-                "k_min": k_min,
-            },
-        )
+        if not record_privacy_budget and persist_artifacts:
+            raise ValueError(
+                "Privacy-budget recording can only be suppressed for "
+                "non-persistent evaluation."
+            )
+        budget_record = None
+        if record_privacy_budget:
+            budget_record = self.ledger.record_spend(
+                run_id=run_id,
+                module="privacy_layer",
+                epsilon=epsilon,
+                engine="laplace_dp_noise",
+                metadata={
+                    "input_rows": int(len(data)),
+                    "output_safe_cohorts": int(len(safe_df)),
+                    "blocked_cohorts": int(blocked_cohorts),
+                    "k_min": k_min,
+                },
+            )
 
         privacy_report = {
             "module": "Hashing & Privacy Layer",
@@ -240,8 +248,11 @@ class PrivacyLayerAgent:
                 "enabled": True,
                 "noise_type": "laplace",
                 "epsilon": epsilon,
-                "privacy_budget_recorded": True,
+                "privacy_budget_recorded": budget_record is not None,
                 "privacy_budget_record": budget_record,
+                "evaluation_only_without_budget_spend": (
+                    budget_record is None
+                ),
             },
             "hashing": {
                 "enabled": resolved["identifier_column"] is not None,

@@ -36,6 +36,7 @@ class AudienceSupervisorDecisionService:
     BLOCKED_FILTER_MODES = {
         "privacy_identifier_request_blocked",
         "export_action_requires_existing_audience",
+        "approval_bypass_attempt_blocked",
         "location_category_gap_no_export",
         "broad_location_no_export",
     }
@@ -141,6 +142,19 @@ class AudienceSupervisorDecisionService:
                 stage="privacy",
                 reasons=("privacy_guardrail_blocked",),
                 next_action="Use only privacy-safe aggregated audience criteria.",
+            )
+
+        if (
+            filter_mode == "approval_bypass_attempt_blocked"
+            or approval_status == "blocked_approval_bypass_attempt"
+        ):
+            return self._blocked(
+                stage="approval",
+                reasons=("approval_bypass_attempt_blocked",),
+                next_action=(
+                    "Use the authenticated approval workflow with an "
+                    "explicit existing run or audience."
+                ),
             )
 
         if (

@@ -236,6 +236,9 @@ The provisioner is idempotent and verifies:
   `NOCREATEROLE`, `NOINHERIT` and `NOREPLICATION`;
 - neither role can create schema/database objects or read the migration ledger;
 - the reader has `SELECT` only;
+- the reader can select the immutable approved-model registry required by
+  governed runtime retrieval, but cannot read feature-build jobs or mutate
+  model approvals;
 - the writer has `SELECT`, `INSERT` and `UPDATE`, but not `DELETE`;
 - the requested tenant can see the expected features;
 - an isolation-probe tenant sees zero features through RLS.

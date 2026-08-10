@@ -44,14 +44,19 @@ must prepare and independently review:
   the runtime and database secrets;
 - Secrets Manager runtime secret containing the documented JSON keys;
 - Secrets Manager database secret containing `username` and `password`;
+- a separate runtime database secret containing `api_username`, `api_password`,
+  `worker_username` and `worker_password`;
 - provider landing and canonical S3 buckets;
 - provider SQS queue and DLQ; and
 - an SNS alert topic with verified human recipients.
 
 The container bootstrap receives the database endpoint from CloudFormation and
-the username/password through ECS secret injection. It URL-encodes the values,
-requires TLS, removes the component credentials from the child environment and
-executes the API or worker without printing the resulting database URL.
+separate API, worker and migration credentials through ECS secret injection. It
+URL-encodes the values, requires TLS, removes the component credentials from the
+child environment and executes the selected process without printing the
+resulting database URL. The administrator secret is never injected into the API
+or provider worker. It is used only by the one-shot bootstrap task to apply the
+complete immutable migration set and provision bounded runtime database roles.
 
 Never place secret values, database URLs, external IDs or credentials in a
 parameter file, template, evidence report, shell history or source control.
@@ -101,7 +106,11 @@ live-production certification.
 
 ## Handoff to certification
 
-Do not enable traffic after IaC review. The next stage must validate load,
+Follow `docs/preproduction_deployment_certification_runbook.md` to deploy the
+foundation with zero runtime tasks, run and verify the one-shot migration task,
+and then start the isolated runtime through a second reviewed change set.
+
+Do not enable production traffic after IaC review. The next stage must validate load,
 autoscaling, queue pressure, dependency failure, zonal disruption, database
 restore, rollback, recovery-time and recovery-point objectives against an
 isolated preproduction stack. Production traffic remains blocked until those

@@ -117,6 +117,13 @@ class FakeConnection:
                     "can_delete_feature_sets": False,
                     "can_delete_feature_vectors": False,
                     "can_read_migration_ledger": False,
+                    "registry_tables_present": True,
+                    "can_select_embedding_models": True,
+                    "can_mutate_embedding_models": False,
+                    "can_select_feature_build_jobs": writer,
+                    "can_insert_feature_build_jobs": writer,
+                    "can_update_feature_build_jobs": writer,
+                    "can_delete_feature_build_jobs": False,
                     "workflow_tables_present": True,
                     "can_select_fresh_data_workflows": writer,
                     "can_insert_fresh_data_workflows": writer,
@@ -264,6 +271,7 @@ def test_roles_are_least_privilege_and_rls_isolation_is_verified():
     assert result["reader_superuser"] is False
     assert result["reader_bypass_rls"] is False
     assert result["reader_can_write"] is False
+    assert result["reader_can_read_approved_model_registry"] is True
     assert result["writer_can_insert_update"] is True
     assert result["writer_can_delete"] is False
     assert result["credentials_exposed"] is False
@@ -280,6 +288,7 @@ def test_roles_are_least_privilege_and_rls_isolation_is_verified():
         admin_sql
     )
     assert "GRANT SELECT ON public.audience_embedding_models" in admin_sql
+    assert 'TO "punk_feature_reader", "punk_feature_writer"' in admin_sql
     assert (
         "GRANT SELECT, INSERT, UPDATE ON "
         "public.audience_feature_build_jobs"

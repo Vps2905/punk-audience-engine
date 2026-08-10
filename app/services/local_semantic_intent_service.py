@@ -8,6 +8,11 @@ from typing import Any
 
 import numpy as np
 
+from app.core.model_artifacts import (
+    configured_local_semantic_model,
+    validate_local_semantic_model_artifact,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,7 +36,7 @@ class LocalSemanticIntentService:
     """
 
     _model = None
-    _model_name: str | None = None
+    _model_identity: tuple[str, str, str] | None = None
     _model_lock = threading.Lock()
 
     CATEGORY_ONTOLOGY: dict[str, tuple[str, ...]] = {
@@ -1138,15 +1143,21 @@ class LocalSemanticIntentService:
 
     @classmethod
     def _get_model(cls):
-        model_name = os.getenv(
-            "LOCAL_SEMANTIC_MODEL",
-            "all-MiniLM-L6-v2",
+        try:
+            model_name, model_revision = configured_local_semantic_model(
+                os.environ
+            )
+        except ValueError as exc:
+            raise LocalSemanticIntentUnavailableError(str(exc)) from exc
+        model_cache = str(
+            os.getenv("LOCAL_SEMANTIC_MODEL_CACHE") or ""
         ).strip()
+        model_identity = (model_name, model_revision, model_cache)
 
         with cls._model_lock:
             if (
                 cls._model is not None
-                and cls._model_name == model_name
+                and cls._model_identity == model_identity
             ):
                 return cls._model
 
@@ -1155,11 +1166,25 @@ class LocalSemanticIntentService:
                     SentenceTransformer,
                 )
 
+                model_options: dict[str, Any] = {
+                    "local_files_only": True,
+                    "trust_remote_code": False,
+                }
+                if model_cache:
+                    artifact = validate_local_semantic_model_artifact(
+                        cache_dir=model_cache,
+                        model_name=model_name,
+                        revision=model_revision,
+                    )
+                    model_source = str(artifact.path)
+                else:
+                    model_source = model_name
+                    model_options["revision"] = model_revision
                 cls._model = SentenceTransformer(
-                    model_name,
-                    local_files_only=True,
+                    model_source,
+                    **model_options,
                 )
-                cls._model_name = model_name
+                cls._model_identity = model_identity
             except Exception as exc:
                 raise LocalSemanticIntentUnavailableError(
                     "Local semantic model is unavailable: "
