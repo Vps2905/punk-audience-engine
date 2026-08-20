@@ -15,4 +15,4 @@ boto3
 # Note: production DPGCSynthesizer requires SDV Enterprise Differential Privacy Bundle.
 sdv>=1.37.3
 pytest>=8.0.0
-langgraph==1.2.9
+langgraph==1.2.11
